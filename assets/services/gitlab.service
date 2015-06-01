@@ -1,0 +1,14 @@
+[Unit]
+Description=Gitlab
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStartPre=-/usr/bin/docker kill gitlab
+ExecStartPre=-/usr/bin/docker rm gitlab
+ExecStartPre=/usr/bin/docker pull sameersbn/gitlab:latest
+ExecStart=/usr/bin/docker run --name gitlab -p 10080:80 -p 10022:22 -v /opt/gitlab/data:/home/git/data -e 'GITLAB_HOST=%H' -e 'GITLAB_PORT=10080' -e 'GITLAB_SSH_PORT=10022' --link gitlab-redis:redisio --link gitlab-postgres:postgresql sameersbn/gitlab:latest
+ExecStop=/usr/bin/docker stop gitlab
+
+[X-Fleet]
+MachineOf=gitlab-postgres.service

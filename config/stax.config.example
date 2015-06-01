@@ -1,0 +1,11 @@
+## stax.config - optional parameters specific to your environment
+
+# the prefix for the name of your stax
+STAX_TAG_PREFIX=""
+
+# the IP of a ssh 'jumpbox' to proxy connections to your VPC
+STAX_JUMP=""
+
+# the webhook URL to allow stax to post to a slack channel (#stax by default)
+# see https://slack.com/services/ for setup documentation
+STAX_SLACK_WHOOK=""

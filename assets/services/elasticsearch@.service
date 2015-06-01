@@ -1,0 +1,68 @@
+[Unit]
+Description=Elasticsearch
+
+# Requirements
+Requires=docker.service
+Requires=etcd.service
+Requires=fleet.service
+Requires=elasticsearch-dv@%i.service
+
+# Dependency ordering and binding
+After=docker.service
+After=etcd.service
+After=fleet.service
+After=elasticsearch-dv@%i.service
+BindsTo=elasticsearch-dv@%i.service
+
+[Service]
+TimeoutStartSec=10m
+Restart=on-failure
+RestartSec=10s
+
+LimitNOFILE=65535
+LimitMEMLOCK=infinity
+
+# Set environmental variables
+EnvironmentFile=/etc/environment
+Environment="ES_CLUSTER=es01"
+
+LimitNOFILE=65535
+LimitMEMLOCK=infinity
+
+ExecStartPre=-/usr/bin/docker kill %p-%i
+ExecStartPre=-/usr/bin/docker rm %p-%i
+ExecStartPre=/usr/bin/docker pull monsantoco/elasticsearch:v1.5.0
+
+ExecStart=/bin/bash -c '\
+  curl -sf ${COREOS_PRIVATE_IPV4}:4001/v2/keys/services/logging/es/${ES_CLUSTER}/host > /dev/null ;\
+  if [ $? -eq 0 ]; then \
+    UNICAST_HOSTS=$(for key in $(etcdctl ls --recursive /services/logging/es/${ES_CLUSTER}/host); do \
+      ip=$(echo $key | cut -d/ -f7) ;\
+      port=$(etcdctl get $key | cut -d, -f3 | cut -d: -f2 | tr -d "} ") ;\
+      echo "$ip:$port" ;\
+    done | paste -s -d",") ;\
+  else \
+    UNICAST_HOSTS="" ;\
+  fi ;\
+  /usr/bin/docker run \
+    --name %p-%i \
+    --publish 9200:9200 \
+    --publish 9300:9300 \
+    --volumes-from elasticsearch-dv-%i \
+    --env ES_CLUSTER=${ES_CLUSTER} \
+    monsantoco/elasticsearch:v1.5.0 \
+    --node.name=%H \
+    --network.publish_host=${COREOS_PRIVATE_IPV4} \
+    --discovery.zen.ping.multicast.enabled=false \
+    --discovery.zen.ping.unicast.hosts=$UNICAST_HOSTS'
+
+ExecStop=-/usr/bin/docker stop %p-%i
+ExecStop=-/usr/bin/docker kill %p-%i
+ExecStop=-/usr/bin/docker rm %p-%i
+
+[Install]
+WantedBy=multi-user.target
+
+[X-Fleet]
+Conflicts=%p@*.service
+MachineOf=elasticsearch-dv@%i.service

@@ -1,0 +1,12 @@
+[Unit]
+Description=Runs DJ (Docker janitor) on schedule
+
+Requires=docker.service
+
+[Timer]
+OnBootSec=1d
+OnCalendar=01:00
+Persistent=true
+
+[Install]
+WantedBy=multi-user.target

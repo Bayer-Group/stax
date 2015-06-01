@@ -1,0 +1,3401 @@
+{
+  "Resources": {
+    "GatewayCoreOSServerAutoScale": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "LoadBalancerNames": [
+          {
+            "Fn::If": [
+              "ServiceELBSSLCertNameIsNotDefined",
+              {
+                "Ref": "GatewayELB"
+              },
+              {
+                "Ref": "GatewayELBSSL"
+              }
+            ]
+          },
+          {
+            "Fn::If": [
+              "WebELBSSLCertNameIsNotDefined",
+              {
+                "Ref": "WebELB"
+              },
+              {
+                "Ref": "WebELBSSL"
+              }
+            ]
+          },
+          {
+            "Fn::If": [
+              "SwarmEnabled",
+              {
+                "Ref": "GatewaySwarmELB"
+              },
+              {
+                "Ref": "AWS::NoValue"
+              }
+            ]
+          }
+        ],
+        "HealthCheckType": "EC2",
+        "VPCZoneIdentifier": [
+          {
+            "Ref": "PriSubnet1"
+          },
+          {
+            "Ref": "PriSubnet2"
+          }
+        ],
+        "MaxSize": "12",
+        "MinSize": "2",
+        "DesiredCapacity": {
+          "Ref": "GatewayClusterSize"
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "gateway",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            },
+            "PropagateAtLaunch": true
+          }
+        ],
+        "LaunchConfigurationName": {
+          "Ref": "GatewayCoreOSServerLaunchConfig"
+        },
+        "AvailabilityZones": [
+          {
+            "Ref": "AvailabilityZone1"
+          },
+          {
+            "Ref": "AvailabilityZone2"
+          }
+        ]
+      }
+    },
+    "CoreOSFromBastionSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "SourceSecurityGroupId": {
+              "Ref": "BastionSecurityGroup"
+            },
+            "FromPort": "22",
+            "ToPort": "22"
+          },
+          {
+            "IpProtocol": "tcp",
+            "SourceSecurityGroupId": {
+              "Ref": "BastionSecurityGroup"
+            },
+            "FromPort": "5601",
+            "ToPort": "5601"
+          }
+        ],
+        "GroupDescription": "Allow general CoreOS/Docker access from the bastion host",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "coreos-from-bastionsg",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      }
+    },
+    "WebELBSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "CidrIp": {
+              "Ref": "AllowHTTPFrom"
+            },
+            "FromPort": "80",
+            "ToPort": "80"
+          }
+        ],
+        "GroupDescription": "Rules for allowing access to/from web ELB",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "web-elbsg",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      },
+      "Condition": "WebELBSSLCertNameIsNotDefined"
+    },
+    "PrivateRouteTable2Route1": {
+      "Type": "AWS::EC2::Route",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "PrivateRouteTable2"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "InstanceId": {
+          "Ref": "NAT2Instance"
+        }
+      }
+    },
+    "RDSSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "SourceSecurityGroupId": {
+              "Ref": "ServiceCoreOSSecurityGroup"
+            },
+            "FromPort": "5432",
+            "ToPort": "5432"
+          }
+        ],
+        "GroupDescription": "Rules for allowing access to RDS nodes from service CoreOS hosts",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "rds-sg",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      }
+    },
+    "WebELB": {
+      "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties": {
+        "HealthCheck": {
+          "Target": "TCP:8000",
+          "UnhealthyThreshold": "5",
+          "HealthyThreshold": "3",
+          "Interval": "30",
+          "Timeout": "5"
+        },
+        "CrossZone": true,
+        "Listeners": [
+          {
+            "LoadBalancerPort": "80",
+            "Protocol": "HTTP",
+            "InstancePort": "8000",
+            "InstanceProtocol": "HTTP"
+          }
+        ],
+        "Subnets": [
+          {
+            "Ref": "PubSubnet1"
+          },
+          {
+            "Ref": "PubSubnet2"
+          }
+        ],
+        "SecurityGroups": [
+          {
+            "Ref": "WebELBSecurityGroup"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "gateway-elb",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      "Condition": "WebELBSSLCertNameIsNotDefined"
+    },
+    "BastionSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "CidrIp": {
+              "Ref": "AllowSSHFrom"
+            },
+            "FromPort": "22",
+            "ToPort": "22"
+          }
+        ],
+        "GroupDescription": "Rules for allowing access to the bastion host",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "bastionsg",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "-1",
+            "CidrIp": "0.0.0.0/0",
+            "FromPort": "0",
+            "ToPort": "65535"
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      }
+    },
+    "ServiceCoreOSServerAutoScale": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "HealthCheckType": "EC2",
+        "VPCZoneIdentifier": [
+          {
+            "Ref": "PriSubnet1"
+          },
+          {
+            "Ref": "PriSubnet2"
+          }
+        ],
+        "MaxSize": "12",
+        "MinSize": "0",
+        "DesiredCapacity": {
+          "Ref": "ServiceClusterSize"
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "service",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            },
+            "PropagateAtLaunch": true
+          }
+        ],
+        "LaunchConfigurationName": {
+          "Ref": "ServiceCoreOSServerLaunchConfig"
+        },
+        "AvailabilityZones": [
+          {
+            "Ref": "AvailabilityZone1"
+          },
+          {
+            "Ref": "AvailabilityZone2"
+          }
+        ]
+      }
+    },
+    "GatewayCoreOSFromSwarmELBSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "SourceSecurityGroupId": {
+              "Fn::If": [
+                "ServiceELBSSLCertNameIsNotDefined",
+                {
+                  "Ref": "SwarmELBSecurityGroup"
+                },
+                {
+                  "Ref": "GatewayServiceELBSSLSecurityGroup"
+                }
+              ]
+            },
+            "FromPort": "2376",
+            "ToPort": "2376"
+          }
+        ],
+        "GroupDescription": "Gateway CoreOS from Swarm ELB SecurityGroup",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "gateway-from-swarm-elbsg",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      },
+      "Condition": "SwarmEnabled"
+    },
+    "NATSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "SourceSecurityGroupId": {
+              "Ref": "BastionSecurityGroup"
+            },
+            "FromPort": "22",
+            "ToPort": "22"
+          },
+          {
+            "IpProtocol": "-1",
+            "CidrIp": {
+              "Ref": "VpcCidr"
+            },
+            "FromPort": "0",
+            "ToPort": "65535"
+          }
+        ],
+        "GroupDescription": "Rules for allowing access to public subnet nodes",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "natsg",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "-1",
+            "CidrIp": "0.0.0.0/0",
+            "FromPort": "0",
+            "ToPort": "65535"
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      }
+    },
+    "GatewayELBSSL": {
+      "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties": {
+        "HealthCheck": {
+          "Target": "HTTP:4001/version",
+          "UnhealthyThreshold": "5",
+          "HealthyThreshold": "3",
+          "Interval": "30",
+          "Timeout": "5"
+        },
+        "CrossZone": true,
+        "Listeners": [
+          {
+            "InstancePort": "80",
+            "LoadBalancerPort": "443",
+            "SSLCertificateId": {
+              "Fn::Join": [
+                "",
+                [
+                  "arn:aws:iam::",
+                  {
+                    "Ref": "AWS::AccountId"
+                  },
+                  ":server-certificate/",
+                  {
+                    "Ref": "ServiceELBSSLCertName"
+                  }
+                ]
+              ]
+            },
+            "Protocol": "HTTPS",
+            "InstanceProtocol": "HTTP"
+          }
+        ],
+        "Subnets": [
+          {
+            "Ref": "PubSubnet1"
+          },
+          {
+            "Ref": "PubSubnet2"
+          }
+        ],
+        "SecurityGroups": [
+          {
+            "Ref": "GatewayServiceELBSSLSecurityGroup"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "gateway-elb",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      "Condition": "ServiceELBSSLCertNameIsDefined"
+    },
+    "StaticContentS3BucketUser": {
+      "Type": "AWS::IAM::User",
+      "Properties": {
+        "Path": "/static-content-s3-users/"
+      }
+    },
+    "InternetGateway": {
+      "Type": "AWS::EC2::InternetGateway",
+      "Properties": {
+        "Tags": [
+          {
+            "Key": "stax:network",
+            "Value": "Public"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "igw",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "PubSubnet1": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "CidrBlock": {
+          "Ref": "PublicSubnet1"
+        },
+        "AvailabilityZone": {
+          "Ref": "AvailabilityZone1"
+        },
+        "Tags": [
+          {
+            "Key": "stax:network",
+            "Value": "Public"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "pubsubnet1",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      }
+    },
+    "NAT2Instance": {
+      "Type": "AWS::EC2::Instance",
+      "Metadata": {
+        "Comment1": "Create NAT #2"
+      },
+      "Properties": {
+        "ImageId": {
+          "Fn::FindInMap": [
+            "AWSNATAMI",
+            {
+              "Ref": "AWS::Region"
+            },
+            "AMI"
+          ]
+        },
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash -v\n",
+                "yum update -y --security\n",
+                "yum update -y aws*\n",
+                ". /etc/profile.d/aws-apitools-common.sh\n",
+                "cd /root\n",
+                "aws s3 cp s3://",
+                {
+                  "Ref": "AWS::StackName"
+                },
+                "/user-data-nat.sh user-data-nat.sh\n",
+                "/bin/bash user-data-nat.sh",
+                " ",
+                {
+                  "Ref": "PrivateRouteTable1"
+                },
+                " ",
+                {
+                  "Ref": "PrivateRouteTable2"
+                },
+                " ",
+                {
+                  "Ref": "AWS::Region"
+                },
+                " ",
+                {
+                  "Ref": "AWS::StackName"
+                },
+                "\n",
+                "# EOF\n"
+              ]
+            ]
+          }
+        },
+        "SecurityGroupIds": [
+          {
+            "Ref": "NATSecurityGroup"
+          }
+        ],
+        "KeyName": {
+          "Ref": "KeyName"
+        },
+        "InstanceType": {
+          "Ref": "NATInstanceType"
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "nat2",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "SourceDestCheck": "false",
+        "IamInstanceProfile": {
+          "Ref": "NATRoleProfile"
+        },
+        "SubnetId": {
+          "Ref": "PubSubnet2"
+        }
+      }
+    },
+    "VPC": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {
+        "CidrBlock": {
+          "Ref": "VpcCidr"
+        },
+        "Tags": [
+          {
+            "Key": "stax:network",
+            "Value": "Public"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "vpc",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "DBSubnetGroup": {
+      "Type": "AWS::RDS::DBSubnetGroup",
+      "Properties": {
+        "DBSubnetGroupDescription": "DB Subnet Group",
+        "SubnetIds": [
+          {
+            "Ref": "DBPriSubnet1"
+          },
+          {
+            "Ref": "DBPriSubnet2"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "stax:network",
+            "Value": "Private"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "dbprivsubnetgroup",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "BastionEIP": {
+      "Type": "AWS::EC2::EIP",
+      "Properties": {
+        "Domain": "vpc",
+        "InstanceId": {
+          "Ref": "BastionInstance"
+        }
+      }
+    },
+    "GatewayToInternet": {
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Properties": {
+        "VpcId": {
+          "Ref": "VPC"
+        },
+        "InternetGatewayId": {
+          "Ref": "InternetGateway"
+        }
+      }
+    },
+    "NAT1Instance": {
+      "Type": "AWS::EC2::Instance",
+      "Metadata": {
+        "Comment1": "Create NAT #1"
+      },
+      "Properties": {
+        "ImageId": {
+          "Fn::FindInMap": [
+            "AWSNATAMI",
+            {
+              "Ref": "AWS::Region"
+            },
+            "AMI"
+          ]
+        },
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash -v\n",
+                "yum update -y --security\n",
+                "yum update -y aws*\n",
+                ". /etc/profile.d/aws-apitools-common.sh\n",
+                "cd /root\n",
+                "aws s3 cp s3://",
+                {
+                  "Ref": "AWS::StackName"
+                },
+                "/user-data-nat.sh user-data-nat.sh\n",
+                "/bin/bash user-data-nat.sh",
+                " ",
+                {
+                  "Ref": "PrivateRouteTable2"
+                },
+                " ",
+                {
+                  "Ref": "PrivateRouteTable1"
+                },
+                " ",
+                {
+                  "Ref": "AWS::Region"
+                },
+                " ",
+                {
+                  "Ref": "AWS::StackName"
+                },
+                "\n",
+                "# EOF\n"
+              ]
+            ]
+          }
+        },
+        "SecurityGroupIds": [
+          {
+            "Ref": "NATSecurityGroup"
+          }
+        ],
+        "KeyName": {
+          "Ref": "KeyName"
+        },
+        "InstanceType": {
+          "Ref": "NATInstanceType"
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "nat1",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "SourceDestCheck": "false",
+        "IamInstanceProfile": {
+          "Ref": "NATRoleProfile"
+        },
+        "SubnetId": {
+          "Ref": "PubSubnet1"
+        }
+      }
+    },
+    "BastionInstance": {
+      "Type": "AWS::EC2::Instance",
+      "Properties": {
+        "ImageId": {
+          "Fn::FindInMap": [
+            "AmazonLinuxAMI",
+            {
+              "Ref": "AWS::Region"
+            },
+            "AMI"
+          ]
+        },
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash -v\n",
+                "yum update -y --security\n",
+                "# EOF\n"
+              ]
+            ]
+          }
+        },
+        "SecurityGroupIds": [
+          {
+            "Ref": "BastionSecurityGroup"
+          }
+        ],
+        "KeyName": {
+          "Ref": "KeyName"
+        },
+        "InstanceType": {
+          "Ref": "BastionInstanceType"
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "bastion",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "SubnetId": {
+          "Ref": "PubSubnet1"
+        }
+      }
+    },
+    "Route53WebELBSSLRecord": {
+      "Type": "AWS::Route53::RecordSet",
+      "Properties": {
+        "Name": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Ref": "WebELBSubdomainName"
+              },
+              ".",
+              {
+                "Ref": "WebELBBaseDomainName"
+              },
+              "."
+            ]
+          ]
+        },
+        "AliasTarget": {
+          "DNSName": {
+            "Fn::GetAtt": [
+              "WebELBSSL",
+              "DNSName"
+            ]
+          },
+          "HostedZoneId": {
+            "Fn::GetAtt": [
+              "WebELBSSL",
+              "CanonicalHostedZoneNameID"
+            ]
+          },
+          "EvaluateTargetHealth": false
+        },
+        "HostedZoneName": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Ref": "WebELBBaseDomainName"
+              },
+              "."
+            ]
+          ]
+        },
+        "Type": "A"
+      },
+      "Condition": "WebELBSubdomainNameAndSSLIsDefined"
+    },
+    "NAT1EIP": {
+      "Type": "AWS::EC2::EIP",
+      "Properties": {
+        "Domain": "vpc",
+        "InstanceId": {
+          "Ref": "NAT1Instance"
+        }
+      }
+    },
+    "GatewayCoreOSServerLaunchConfig": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Properties": {
+        "ImageId": {
+          "Fn::FindInMap": [
+            {
+              "Ref": "CoreOSChannelAMI"
+            },
+            {
+              "Ref": "AWS::Region"
+            },
+            "AMI"
+          ]
+        },
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#cloud-config\n\ncoreos:\n  etcd:\n    addr: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:4001\n    peer-addr: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:7001\n    peer-heartbeat-interval: 1000\n    peer-election-timeout: 2000\n    peers: ",
+                {
+                  "Fn::GetAtt": [
+                    "ServiceLeaderInstance1",
+                    "PrivateIp"
+                  ]
+                },
+                ":7001,",
+                {
+                  "Fn::GetAtt": [
+                    "ServiceLeaderInstance2",
+                    "PrivateIp"
+                  ]
+                },
+                ":7001,",
+                {
+                  "Fn::GetAtt": [
+                    "ServiceLeaderInstance3",
+                    "PrivateIp"
+                  ]
+                },
+                ":7001\n\n  fleet:\n    public-ip: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4\n    etcd-servers: http://$",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:4001/\n    etcd-request-timeout: 3\n\n  units:\n    - name: etcd.service\n      command: start\n    - name: settimezone.service\n      command: start\n      content: |\n        [Unit]\n        Description=Set the timezone\n      \n        [Service]\n        ExecStart=/usr/bin/timedatectl set-timezone UTC\n        RemainAfterExit=yes\n        Type=oneshot\n\nwrite_files:\n  - path: /etc/ntp.conf\n    content: |\n      server 0.pool.ntp.org\n      server 1.pool.ntp.org\n      server 2.pool.ntp.org\n      server 3.pool.ntp.org\n      restrict default nomodify nopeer noquery limited kod\n      restrict 127.0.0.1"
+              ]
+            ]
+          }
+        },
+        "SecurityGroups": [
+          {
+            "Ref": "CoreOSSecurityGroup"
+          },
+          {
+            "Ref": "GatewayCoreOSFromServiceELBSecurityGroup"
+          },
+          {
+            "Ref": "CoreOSFromBastionSecurityGroup"
+          },
+          {
+            "Ref": "GatewayCoreOSFromWebELBSecurityGroup"
+          },
+          {
+            "Fn::If": [
+              "SwarmEnabled",
+              {
+                "Ref": "GatewayCoreOSFromSwarmELBSecurityGroup"
+              },
+              {
+                "Ref": "AWS::NoValue"
+              }
+            ]
+          }
+        ],
+        "KeyName": {
+          "Ref": "KeyName"
+        },
+        "InstanceType": {
+          "Ref": "DockerInstanceType"
+        }
+      }
+    },
+    "SwarmELBSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "CidrIp": {
+              "Ref": "AllowHTTPFrom"
+            },
+            "FromPort": "80",
+            "ToPort": "80"
+          }
+        ],
+        "GroupDescription": "Rules for allowing access to/from swarm gateway ELB",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "gateway-swarm-elbsg",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      },
+      "Condition": "SwarmEnabled"
+    },
+    "NATRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  "ec2.amazonaws.com"
+                ]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "NAT_Takeover",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:DescribeInstances",
+                    "ec2:DescribeRouteTables",
+                    "ec2:CreateRoute",
+                    "ec2:ReplaceRoute",
+                    "ec2:StartInstances",
+                    "ec2:StopInstances"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "StaxS3Access",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject"
+                  ],
+                  "Resource": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:aws:s3:::",
+                        {
+                          "Ref": "AWS::StackName"
+                        },
+                        "/*"
+                      ]
+                    ]
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "Path": "/"
+      }
+    },
+    "PriSubnet1": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "CidrBlock": {
+          "Ref": "PrivateSubnet1"
+        },
+        "AvailabilityZone": {
+          "Ref": "AvailabilityZone1"
+        },
+        "Tags": [
+          {
+            "Key": "stax:network",
+            "Value": "Private"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "prisubnet1",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      }
+    },
+    "PubSubnet2": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "CidrBlock": {
+          "Ref": "PublicSubnet2"
+        },
+        "AvailabilityZone": {
+          "Ref": "AvailabilityZone2"
+        },
+        "Tags": [
+          {
+            "Key": "stax:network",
+            "Value": "Public"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "pubsubnet2",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      }
+    },
+    "ServiceLeaderInstance3": {
+      "Type": "AWS::EC2::Instance",
+      "Properties": {
+        "ImageId": {
+          "Fn::FindInMap": [
+            {
+              "Ref": "CoreOSChannelAMI"
+            },
+            {
+              "Ref": "AWS::Region"
+            },
+            "AMI"
+          ]
+        },
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#cloud-config\n\ncoreos:\n  etcd:\n    addr: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:4001\n    peer-addr: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:7001\n    peer-heartbeat-interval: 1000\n    peer-election-timeout: 2000\n    peers: ",
+                {
+                  "Fn::GetAtt": [
+                    "ServiceLeaderInstance1",
+                    "PrivateIp"
+                  ]
+                },
+                ":7001\n\n  fleet:\n    public-ip: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4\n    etcd-servers: http://$",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:4001/\n    etcd-request-timeout: 3\n\n  units:\n    - name: etcd.service\n      command: start\n    - name: settimezone.service\n      command: start\n      content: |\n        [Unit]\n        Description=Set the timezone\n      \n        [Service]\n        ExecStart=/usr/bin/timedatectl set-timezone UTC\n        RemainAfterExit=yes\n        Type=oneshot\n      \n    - name: fleet.service\n      command: start\n      content: |\n        [Unit]\n        Description=fleet daemon\n        Wants=etcd.service\n        After=etcd.service\n        Wants=fleet.socket\n        After=fleet.socket\n      \n        [Service]\n        ExecStartPre=/usr/bin/mkdir -p /etc/fleet ; /bin/bash -c 'case $(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone) in ",
+                {
+                  "Ref": "AvailabilityZone1"
+                },
+                ") az=1;; ",
+                {
+                  "Ref": "AvailabilityZone2"
+                },
+                ") az=2;; *) exit 1;; esac; echo metadata=\"location=$az\" > /etc/fleet/fleet.conf'\n        ExecStart=/usr/bin/fleetd\n        Restart=always\n        RestartSec=10s\n    - name: fleet.socket\n      command: start\n      enable: yes\n      content: |\n        [Unit]\n        Description=Fleet Socket for the API\n      \n        [Socket]\n        ListenStream=41337\n        BindIPv6Only=both\n        Service=fleet.service\n      \n        [Install]\n        WantedBy=sockets.target\n\nwrite_files:\n  - path: /etc/ntp.conf\n    content: |\n      server 0.pool.ntp.org\n      server 1.pool.ntp.org\n      server 2.pool.ntp.org\n      server 3.pool.ntp.org\n      restrict default nomodify nopeer noquery limited kod\n      restrict 127.0.0.1"
+              ]
+            ]
+          }
+        },
+        "SecurityGroupIds": [
+          {
+            "Ref": "CoreOSSecurityGroup"
+          },
+          {
+            "Ref": "ServiceCoreOSSecurityGroup"
+          },
+          {
+            "Ref": "CoreOSFromBastionSecurityGroup"
+          }
+        ],
+        "KeyName": {
+          "Ref": "KeyName"
+        },
+        "InstanceType": {
+          "Ref": "DockerInstanceType"
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "service-leader-3",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "Monitoring": true,
+        "SubnetId": {
+          "Ref": "PriSubnet2"
+        }
+      }
+    },
+    "StaticContentS3BucketAccessKey": {
+      "Type": "AWS::IAM::AccessKey",
+      "Properties": {
+        "UserName": {
+          "Ref": "StaticContentS3BucketUser"
+        },
+        "Status": "Active"
+      }
+    },
+    "PriSubnet1RTAssoc": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId": {
+          "Ref": "PriSubnet1"
+        },
+        "RouteTableId": {
+          "Ref": "PrivateRouteTable1"
+        }
+      }
+    },
+    "StaticContentS3Bucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketName": {
+          "Fn::Join": [
+            "-",
+            [
+              "mon-static-hosting",
+              {
+                "Ref": "AWS::StackName"
+              }
+            ]
+          ]
+        },
+        "AccessControl": "AuthenticatedRead"
+      }
+    },
+    "PrivateRouteTable2": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": {
+          "Ref": "VPC"
+        },
+        "Tags": [
+          {
+            "Key": "stax:network",
+            "Value": "Private"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "privrt2",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "DBPriSubnet1": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "CidrBlock": {
+          "Ref": "DBSubnet1Cidr"
+        },
+        "AvailabilityZone": {
+          "Ref": "AvailabilityZone1"
+        },
+        "Tags": [
+          {
+            "Key": "stax:network",
+            "Value": "Private"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "dbprivsubnet1",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      }
+    },
+    "GatewaySwarmELB": {
+      "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties": {
+        "HealthCheck": {
+          "Target": "TCP:2376",
+          "UnhealthyThreshold": "5",
+          "HealthyThreshold": "3",
+          "Interval": "30",
+          "Timeout": "5"
+        },
+        "CrossZone": true,
+        "Listeners": [
+          {
+            "LoadBalancerPort": "80",
+            "Protocol": "TCP",
+            "InstancePort": "2376",
+            "InstanceProtocol": "TCP"
+          }
+        ],
+        "Subnets": [
+          {
+            "Ref": "PubSubnet1"
+          },
+          {
+            "Ref": "PubSubnet2"
+          }
+        ],
+        "SecurityGroups": [
+          {
+            "Ref": "SwarmELBSecurityGroup"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "gateway-elb",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      "Condition": "SwarmEnabled"
+    },
+    "Route53ServiceGatewayELBRecord": {
+      "Type": "AWS::Route53::RecordSet",
+      "Properties": {
+        "Name": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Ref": "ServiceELBSubdomainName"
+              },
+              ".",
+              {
+                "Ref": "ServiceELBBaseDomainName"
+              },
+              "."
+            ]
+          ]
+        },
+        "AliasTarget": {
+          "DNSName": {
+            "Fn::GetAtt": [
+              "GatewayELB",
+              "DNSName"
+            ]
+          },
+          "HostedZoneId": {
+            "Fn::GetAtt": [
+              "GatewayELB",
+              "CanonicalHostedZoneNameID"
+            ]
+          },
+          "EvaluateTargetHealth": false
+        },
+        "HostedZoneName": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Ref": "ServiceELBBaseDomainName"
+              },
+              "."
+            ]
+          ]
+        },
+        "Type": "A"
+      },
+      "Condition": "ServiceELBSubdomainNameIsDefinedAndSSLIsNotDefined"
+    },
+    "PublicRouteTable": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": {
+          "Ref": "VPC"
+        },
+        "Tags": [
+          {
+            "Key": "stax:network",
+            "Value": "Public"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "pubrt",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "PriSubnet2": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "CidrBlock": {
+          "Ref": "PrivateSubnet2"
+        },
+        "AvailabilityZone": {
+          "Ref": "AvailabilityZone2"
+        },
+        "Tags": [
+          {
+            "Key": "stax:network",
+            "Value": "Private"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "prisubnet2",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      }
+    },
+    "GatewayELB": {
+      "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties": {
+        "HealthCheck": {
+          "Target": "TCP:80",
+          "UnhealthyThreshold": "5",
+          "HealthyThreshold": "3",
+          "Interval": "30",
+          "Timeout": "5"
+        },
+        "CrossZone": true,
+        "Listeners": [
+          {
+            "LoadBalancerPort": "80",
+            "Protocol": "HTTP",
+            "InstancePort": "80",
+            "InstanceProtocol": "HTTP"
+          }
+        ],
+        "Subnets": [
+          {
+            "Ref": "PubSubnet1"
+          },
+          {
+            "Ref": "PubSubnet2"
+          }
+        ],
+        "SecurityGroups": [
+          {
+            "Ref": "GatewayServiceELBSecurityGroup"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "gateway-elb",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      "Condition": "ServiceELBSSLCertNameIsNotDefined"
+    },
+    "GatewayCoreOSFromWebELBSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "SourceSecurityGroupId": {
+              "Fn::If": [
+                "WebELBSSLCertNameIsNotDefined",
+                {
+                  "Ref": "WebELBSecurityGroup"
+                },
+                {
+                  "Ref": "WebELBSSLSecurityGroup"
+                }
+              ]
+            },
+            "FromPort": "8000",
+            "ToPort": "8000"
+          }
+        ],
+        "GroupDescription": "Gateway CoreOS from Web ELB SecurityGroup",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "gateway-from-web-elbsg",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      }
+    },
+    "StaticContentS3BucketPolicy": {
+      "Type": "AWS::S3::BucketPolicy",
+      "Properties": {
+        "Bucket": {
+          "Ref": "StaticContentS3Bucket"
+        },
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": [
+                  {
+                    "Fn::GetAtt": [
+                      "StaticContentS3BucketUser",
+                      "Arn"
+                    ]
+                  }
+                ]
+              },
+              "Action": [
+                "s3:GetObject"
+              ],
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:aws:s3:::",
+                    {
+                      "Ref": "StaticContentS3Bucket"
+                    },
+                    "/*"
+                  ]
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    "NATSecurityGroupAllowICMP": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Properties": {
+        "GroupId": {
+          "Ref": "NATSecurityGroup"
+        },
+        "ToPort": "-1",
+        "FromPort": "-1",
+        "IpProtocol": "icmp",
+        "SourceSecurityGroupId": {
+          "Ref": "NATSecurityGroup"
+        }
+      }
+    },
+    "ServiceCoreOSServerAutoScaleDownPolicy": {
+      "Type": "AWS::AutoScaling::ScalingPolicy",
+      "Properties": {
+        "AutoScalingGroupName": {
+          "Ref": "ServiceCoreOSServerAutoScale"
+        },
+        "ScalingAdjustment": "-1",
+        "Cooldown": {
+          "Ref": "AutoScaleCooldown"
+        },
+        "AdjustmentType": "ChangeInCapacity"
+      }
+    },
+    "GatewayServiceELBSSLSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "CidrIp": {
+              "Ref": "AllowHTTPFrom"
+            },
+            "FromPort": "443",
+            "ToPort": "443"
+          }
+        ],
+        "GroupDescription": "Rules for allowing access to/from service gateway ELB",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "gateway-service-elbsg",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      },
+      "Condition": "ServiceELBSSLCertNameIsDefined"
+    },
+    "NATRoleProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Path": "/",
+        "Roles": [
+          {
+            "Ref": "NATRole"
+          }
+        ]
+      }
+    },
+    "ServiceCoreOSSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Security CoreOS SecurityGroup",
+        "VpcId": {
+          "Ref": "VPC"
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "service-coreossg",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "PrivateRouteTable1": {
+      "Type": "AWS::EC2::RouteTable",
+      "Properties": {
+        "VpcId": {
+          "Ref": "VPC"
+        },
+        "Tags": [
+          {
+            "Key": "stax:network",
+            "Value": "Private"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "privrt1",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "PublicRouteTableRoute1": {
+      "Type": "AWS::EC2::Route",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "PublicRouteTable"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "InternetGateway"
+        }
+      }
+    },
+    "WebELBSSLSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "CidrIp": {
+              "Ref": "AllowHTTPFrom"
+            },
+            "FromPort": "80",
+            "ToPort": "80"
+          },
+          {
+            "IpProtocol": "tcp",
+            "CidrIp": {
+              "Ref": "AllowHTTPFrom"
+            },
+            "FromPort": "443",
+            "ToPort": "443"
+          }
+        ],
+        "GroupDescription": "Rules for allowing access to/from web ELB",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "web-elbsg",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      },
+      "Condition": "WebELBSSLCertNameIsDefined"
+    },
+    "PriSubnet2RTAssoc": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId": {
+          "Ref": "PriSubnet2"
+        },
+        "RouteTableId": {
+          "Ref": "PrivateRouteTable2"
+        }
+      }
+    },
+    "NAT2EIP": {
+      "Type": "AWS::EC2::EIP",
+      "Properties": {
+        "Domain": "vpc",
+        "InstanceId": {
+          "Ref": "NAT2Instance"
+        }
+      }
+    },
+    "DBPriSubnet2": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "CidrBlock": {
+          "Ref": "DBSubnet2Cidr"
+        },
+        "AvailabilityZone": {
+          "Ref": "AvailabilityZone2"
+        },
+        "Tags": [
+          {
+            "Key": "stax:network",
+            "Value": "Private"
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "dbprivsubnet2",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      }
+    },
+    "ServiceCoreOSServerLaunchConfig": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Properties": {
+        "ImageId": {
+          "Fn::FindInMap": [
+            {
+              "Ref": "CoreOSChannelAMI"
+            },
+            {
+              "Ref": "AWS::Region"
+            },
+            "AMI"
+          ]
+        },
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#cloud-config\n\ncoreos:\n  etcd:\n    addr: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:4001\n    peer-addr: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:7001\n    peer-heartbeat-interval: 1000\n    peer-election-timeout: 2000\n    peers: ",
+                {
+                  "Fn::GetAtt": [
+                    "ServiceLeaderInstance1",
+                    "PrivateIp"
+                  ]
+                },
+                ":7001\n\n  fleet:\n    public-ip: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4\n    etcd-servers: http://$",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:4001/\n    etcd-request-timeout: 3\n\n  units:\n    - name: etcd.service\n      command: start\n    - name: settimezone.service\n      command: start\n      content: |\n        [Unit]\n        Description=Set the timezone\n      \n        [Service]\n        ExecStart=/usr/bin/timedatectl set-timezone UTC\n        RemainAfterExit=yes\n        Type=oneshot\n      \n    - name: fleet.service\n      command: start\n      content: |\n        [Unit]\n        Description=fleet daemon\n        Wants=etcd.service\n        After=etcd.service\n        Wants=fleet.socket\n        After=fleet.socket\n      \n        [Service]\n        ExecStartPre=/usr/bin/mkdir -p /etc/fleet ; /bin/bash -c 'case $(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone) in ",
+                {
+                  "Ref": "AvailabilityZone1"
+                },
+                ") az=1;; ",
+                {
+                  "Ref": "AvailabilityZone2"
+                },
+                ") az=2;; *) exit 1;; esac; echo metadata=\"location=$az\" > /etc/fleet/fleet.conf'\n        ExecStart=/usr/bin/fleetd\n        Restart=always\n        RestartSec=10s\n    - name: fleet.socket\n      command: start\n      enable: yes\n      content: |\n        [Unit]\n        Description=Fleet Socket for the API\n      \n        [Socket]\n        ListenStream=41337\n        BindIPv6Only=both\n        Service=fleet.service\n      \n        [Install]\n        WantedBy=sockets.target\n\nwrite_files:\n  - path: /etc/ntp.conf\n    content: |\n      server 0.pool.ntp.org\n      server 1.pool.ntp.org\n      server 2.pool.ntp.org\n      server 3.pool.ntp.org\n      restrict default nomodify nopeer noquery limited kod\n      restrict 127.0.0.1"
+              ]
+            ]
+          }
+        },
+        "SecurityGroups": [
+          {
+            "Ref": "CoreOSSecurityGroup"
+          },
+          {
+            "Ref": "ServiceCoreOSSecurityGroup"
+          },
+          {
+            "Ref": "CoreOSFromBastionSecurityGroup"
+          }
+        ],
+        "KeyName": {
+          "Ref": "KeyName"
+        },
+        "InstanceType": {
+          "Ref": "DockerInstanceType"
+        }
+      }
+    },
+    "GatewayELBToGatewayCoreOSGateway": {
+      "Type": "AWS::EC2::SecurityGroupEgress",
+      "Properties": {
+        "DestinationSecurityGroupId": {
+          "Ref": "GatewayCoreOSFromServiceELBSecurityGroup"
+        },
+        "GroupId": {
+          "Fn::If": [
+            "ServiceELBSSLCertNameIsNotDefined",
+            {
+              "Ref": "GatewayServiceELBSecurityGroup"
+            },
+            {
+              "Ref": "GatewayServiceELBSSLSecurityGroup"
+            }
+          ]
+        },
+        "ToPort": "80",
+        "FromPort": "80",
+        "IpProtocol": "tcp"
+      }
+    },
+    "PrivateRouteTable1Route1": {
+      "Type": "AWS::EC2::Route",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "PrivateRouteTable1"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "InstanceId": {
+          "Ref": "NAT1Instance"
+        }
+      }
+    },
+    "PubSubnet2RTAssoc": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId": {
+          "Ref": "PubSubnet2"
+        },
+        "RouteTableId": {
+          "Ref": "PublicRouteTable"
+        }
+      }
+    },
+    "ServiceCoreOSServerAutoScaleUpPolicy": {
+      "Type": "AWS::AutoScaling::ScalingPolicy",
+      "Properties": {
+        "AutoScalingGroupName": {
+          "Ref": "ServiceCoreOSServerAutoScale"
+        },
+        "ScalingAdjustment": "1",
+        "Cooldown": {
+          "Ref": "AutoScaleCooldown"
+        },
+        "AdjustmentType": "ChangeInCapacity"
+      }
+    },
+    "WebELBSSL": {
+      "Type": "AWS::ElasticLoadBalancing::LoadBalancer",
+      "Properties": {
+        "HealthCheck": {
+          "Target": "TCP:8000",
+          "UnhealthyThreshold": "5",
+          "HealthyThreshold": "3",
+          "Interval": "30",
+          "Timeout": "5"
+        },
+        "CrossZone": true,
+        "Listeners": [
+          {
+            "LoadBalancerPort": "80",
+            "Protocol": "HTTP",
+            "InstancePort": "8000",
+            "InstanceProtocol": "HTTP"
+          },
+          {
+            "InstancePort": "8000",
+            "LoadBalancerPort": "443",
+            "SSLCertificateId": {
+              "Fn::Join": [
+                "",
+                [
+                  "arn:aws:iam::",
+                  {
+                    "Ref": "AWS::AccountId"
+                  },
+                  ":server-certificate/",
+                  {
+                    "Ref": "WebELBSSLCertName"
+                  }
+                ]
+              ]
+            },
+            "Protocol": "HTTPS",
+            "InstanceProtocol": "HTTP"
+          }
+        ],
+        "Subnets": [
+          {
+            "Ref": "PubSubnet1"
+          },
+          {
+            "Ref": "PubSubnet2"
+          }
+        ],
+        "SecurityGroups": [
+          {
+            "Ref": "WebELBSSLSecurityGroup"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "gateway-elb",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ]
+      },
+      "Condition": "WebELBSSLCertNameIsDefined"
+    },
+    "ServiceLeaderInstance2": {
+      "Type": "AWS::EC2::Instance",
+      "Properties": {
+        "ImageId": {
+          "Fn::FindInMap": [
+            {
+              "Ref": "CoreOSChannelAMI"
+            },
+            {
+              "Ref": "AWS::Region"
+            },
+            "AMI"
+          ]
+        },
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#cloud-config\n\ncoreos:\n  etcd:\n    addr: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:4001\n    peer-addr: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:7001\n    peer-heartbeat-interval: 1000\n    peer-election-timeout: 2000\n    peers: ",
+                {
+                  "Fn::GetAtt": [
+                    "ServiceLeaderInstance1",
+                    "PrivateIp"
+                  ]
+                },
+                ":7001\n\n  fleet:\n    public-ip: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4\n    etcd-servers: http://$",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:4001/\n    etcd-request-timeout: 3\n\n  units:\n    - name: etcd.service\n      command: start\n    - name: settimezone.service\n      command: start\n      content: |\n        [Unit]\n        Description=Set the timezone\n      \n        [Service]\n        ExecStart=/usr/bin/timedatectl set-timezone UTC\n        RemainAfterExit=yes\n        Type=oneshot\n      \n    - name: fleet.service\n      command: start\n      content: |\n        [Unit]\n        Description=fleet daemon\n        Wants=etcd.service\n        After=etcd.service\n        Wants=fleet.socket\n        After=fleet.socket\n      \n        [Service]\n        ExecStartPre=/usr/bin/mkdir -p /etc/fleet ; /bin/bash -c 'case $(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone) in ",
+                {
+                  "Ref": "AvailabilityZone1"
+                },
+                ") az=1;; ",
+                {
+                  "Ref": "AvailabilityZone2"
+                },
+                ") az=2;; *) exit 1;; esac; echo metadata=\"location=$az\" > /etc/fleet/fleet.conf'\n        ExecStart=/usr/bin/fleetd\n        Restart=always\n        RestartSec=10s\n    - name: fleet.socket\n      command: start\n      enable: yes\n      content: |\n        [Unit]\n        Description=Fleet Socket for the API\n      \n        [Socket]\n        ListenStream=41337\n        BindIPv6Only=both\n        Service=fleet.service\n      \n        [Install]\n        WantedBy=sockets.target\n\nwrite_files:\n  - path: /etc/ntp.conf\n    content: |\n      server 0.pool.ntp.org\n      server 1.pool.ntp.org\n      server 2.pool.ntp.org\n      server 3.pool.ntp.org\n      restrict default nomodify nopeer noquery limited kod\n      restrict 127.0.0.1"
+              ]
+            ]
+          }
+        },
+        "SecurityGroupIds": [
+          {
+            "Ref": "CoreOSSecurityGroup"
+          },
+          {
+            "Ref": "ServiceCoreOSSecurityGroup"
+          },
+          {
+            "Ref": "CoreOSFromBastionSecurityGroup"
+          }
+        ],
+        "KeyName": {
+          "Ref": "KeyName"
+        },
+        "InstanceType": {
+          "Ref": "DockerInstanceType"
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "service-leader-2",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "Monitoring": true,
+        "SubnetId": {
+          "Ref": "PriSubnet2"
+        }
+      }
+    },
+    "Route53ServiceGatewayELBSSLRecord": {
+      "Type": "AWS::Route53::RecordSet",
+      "Properties": {
+        "Name": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Ref": "ServiceELBSubdomainName"
+              },
+              ".",
+              {
+                "Ref": "ServiceELBBaseDomainName"
+              },
+              "."
+            ]
+          ]
+        },
+        "AliasTarget": {
+          "DNSName": {
+            "Fn::GetAtt": [
+              "GatewayELBSSL",
+              "DNSName"
+            ]
+          },
+          "HostedZoneId": {
+            "Fn::GetAtt": [
+              "GatewayELBSSL",
+              "CanonicalHostedZoneNameID"
+            ]
+          },
+          "EvaluateTargetHealth": false
+        },
+        "HostedZoneName": {
+          "Fn::Join": [
+            "",
+            [
+              {
+                "Ref": "ServiceELBBaseDomainName"
+              },
+              "."
+            ]
+          ]
+        },
+        "Type": "A"
+      },
+      "Condition": "ServiceELBSubdomainNameAndSSLIsDefined"
+    },
+    "CoreOSSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "-1",
+            "CidrIp": {
+              "Ref": "PrivateSubnet1"
+            },
+            "FromPort": "0",
+            "ToPort": "65535"
+          },
+          {
+            "IpProtocol": "-1",
+            "CidrIp": {
+              "Ref": "PrivateSubnet2"
+            },
+            "FromPort": "0",
+            "ToPort": "65535"
+          }
+        ],
+        "GroupDescription": "CoreOS Communication SecurityGroup",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "coreossg",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "-1",
+            "CidrIp": "0.0.0.0/0",
+            "FromPort": "0",
+            "ToPort": "65535"
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      }
+    },
+    "PubSubnet1RTAssoc": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Properties": {
+        "SubnetId": {
+          "Ref": "PubSubnet1"
+        },
+        "RouteTableId": {
+          "Ref": "PublicRouteTable"
+        }
+      }
+    },
+    "GatewayELBToGatewayCoreOSHealthCheck": {
+      "Type": "AWS::EC2::SecurityGroupEgress",
+      "Properties": {
+        "DestinationSecurityGroupId": {
+          "Ref": "GatewayCoreOSFromSwarmELBSecurityGroup"
+        },
+        "GroupId": {
+          "Fn::If": [
+            "ServiceELBSSLCertNameIsNotDefined",
+            {
+              "Ref": "SwarmELBSecurityGroup"
+            },
+            {
+              "Ref": "GatewayServiceELBSSLSecurityGroup"
+            }
+          ]
+        },
+        "ToPort": "2376",
+        "FromPort": "2376",
+        "IpProtocol": "tcp"
+      },
+      "Condition": "SwarmEnabled"
+    },
+    "GatewayCoreOSFromServiceELBSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "SourceSecurityGroupId": {
+              "Fn::If": [
+                "ServiceELBSSLCertNameIsNotDefined",
+                {
+                  "Ref": "GatewayServiceELBSecurityGroup"
+                },
+                {
+                  "Ref": "GatewayServiceELBSSLSecurityGroup"
+                }
+              ]
+            },
+            "FromPort": "80",
+            "ToPort": "80"
+          },
+          {
+            "IpProtocol": "tcp",
+            "SourceSecurityGroupId": {
+              "Fn::If": [
+                "ServiceELBSSLCertNameIsNotDefined",
+                {
+                  "Ref": "GatewayServiceELBSecurityGroup"
+                },
+                {
+                  "Ref": "GatewayServiceELBSSLSecurityGroup"
+                }
+              ]
+            },
+            "FromPort": "4001",
+            "ToPort": "4001"
+          }
+        ],
+        "GroupDescription": "Gateway CoreOS from Service ELB SecurityGroup",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "gateway-from-service-elbsg",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      }
+    },
+    "GatewayServiceELBSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "SecurityGroupIngress": [
+          {
+            "IpProtocol": "tcp",
+            "CidrIp": {
+              "Ref": "AllowHTTPFrom"
+            },
+            "FromPort": "80",
+            "ToPort": "80"
+          }
+        ],
+        "GroupDescription": "Rules for allowing access to/from service gateway ELB",
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "gateway-service-elbsg",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "VpcId": {
+          "Ref": "VPC"
+        }
+      },
+      "Condition": "ServiceELBSSLCertNameIsNotDefined"
+    },
+    "ServiceLeaderInstance1": {
+      "Type": "AWS::EC2::Instance",
+      "Properties": {
+        "ImageId": {
+          "Fn::FindInMap": [
+            {
+              "Ref": "CoreOSChannelAMI"
+            },
+            {
+              "Ref": "AWS::Region"
+            },
+            "AMI"
+          ]
+        },
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#cloud-config\n\ncoreos:\n  etcd:\n    addr: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:4001\n    peer-addr: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:7001\n    peer-heartbeat-interval: 1000\n    peer-election-timeout: 2000\n\n  fleet:\n    public-ip: $",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4\n    etcd-servers: http://$",
+                {
+                  "Ref": "AdvertisedIPAddress"
+                },
+                "_ipv4:4001/\n    etcd-request-timeout: 3\n\n  units:\n    - name: etcd.service\n      command: start\n    - name: settimezone.service\n      command: start\n      content: |\n        [Unit]\n        Description=Set the timezone\n      \n        [Service]\n        ExecStart=/usr/bin/timedatectl set-timezone UTC\n        RemainAfterExit=yes\n        Type=oneshot\n      \n    - name: fleet.service\n      command: start\n      content: |\n        [Unit]\n        Description=fleet daemon\n        Wants=etcd.service\n        After=etcd.service\n        Wants=fleet.socket\n        After=fleet.socket\n      \n        [Service]\n        ExecStartPre=/usr/bin/mkdir -p /etc/fleet ; /bin/bash -c 'case $(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone) in ",
+                {
+                  "Ref": "AvailabilityZone1"
+                },
+                ") az=1;; ",
+                {
+                  "Ref": "AvailabilityZone2"
+                },
+                ") az=2;; *) exit 1;; esac; echo metadata=\"location=$az\" > /etc/fleet/fleet.conf'\n        ExecStart=/usr/bin/fleetd\n        Restart=always\n        RestartSec=10s\n    - name: fleet.socket\n      command: start\n      enable: yes\n      content: |\n        [Unit]\n        Description=Fleet Socket for the API\n      \n        [Socket]\n        ListenStream=41337\n        BindIPv6Only=both\n\nwrite_files:\n  - path: /etc/ntp.conf\n    content: |\n      server 0.pool.ntp.org\n      server 1.pool.ntp.org\n      server 2.pool.ntp.org\n      server 3.pool.ntp.org\n      restrict default nomodify nopeer noquery limited kod\n      restrict 127.0.0.1"
+              ]
+            ]
+          }
+        },
+        "SecurityGroupIds": [
+          {
+            "Ref": "CoreOSSecurityGroup"
+          },
+          {
+            "Ref": "ServiceCoreOSSecurityGroup"
+          },
+          {
+            "Ref": "CoreOSFromBastionSecurityGroup"
+          }
+        ],
+        "KeyName": {
+          "Ref": "KeyName"
+        },
+        "InstanceType": {
+          "Ref": "DockerInstanceType"
+        },
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                "-",
+                [
+                  "service-leader-1",
+                  {
+                    "Ref": "AWS::StackName"
+                  }
+                ]
+              ]
+            }
+          }
+        ],
+        "Monitoring": true,
+        "SubnetId": {
+          "Ref": "PriSubnet1"
+        }
+      }
+    }
+  },
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Auto scaling group of Docker engines in dual AZ VPC with two NAT nodes in an active/active configuration. After successfully launching this CloudFormation stack, you will have 6 subnets in 2 AZs: a pair each of public, private, and database subnets, a bastion host, two NAT instances routing outbound traffic for their respective private subnets.  The NAT instances will automatically monitor each other and fix outbound routing problems if the other instance is unavailable.  Two Docker engine auto scaling groups, one for the gateway and one for services, will deploy to the private subnets.",
+  "Parameters": {
+    "DockerRegistryUrl": {
+      "Default": "https://index.docker.io/v1/",
+      "MinLength": "8",
+      "Description": "URL for private Docker Registry",
+      "MaxLength": "200",
+      "Type": "String"
+    },
+    "WebOAuthClientID": {
+      "Default": "",
+      "MinLength": "0",
+      "Description": "Oauth client ID to use on web tier (must already be registered in ping)",
+      "MaxLength": "64",
+      "Type": "String"
+    },
+    "Environment": {
+      "MinLength": "1",
+      "Description": "Description of deployment environment, e. g., test or production",
+      "ConstraintDescription": "Can contain only alphanumeric characters, spaces, dashes and underscores.",
+      "AllowedPattern": "[-_ a-zA-Z0-9]*",
+      "MaxLength": "64",
+      "Type": "String"
+    },
+    "DockerRegistryEmail": {
+      "Default": "nobody@null.com",
+      "MinLength": "0",
+      "Description": "Email address for private Docker Registry",
+      "MaxLength": "60",
+      "Type": "String"
+    },
+    "BastionInstanceType": {
+      "Default": "t2.micro",
+      "Description": "Instance type for public subnet bastion node",
+      "ConstraintDescription": "Must be a valid EC2 instance type.",
+      "AllowedValues": [
+        "m3.medium",
+        "m3.large",
+        "m3.xlarge",
+        "m3.2xlarge",
+        "c3.large",
+        "c3.xlarge",
+        "c3.2xlarge",
+        "c3.4xlarge",
+        "c3.8xlarge",
+        "cc2.8xlarge",
+        "cr1.8xlarge",
+        "hi1.4xlarge",
+        "hs1.8xlarge",
+        "i2.xlarge",
+        "i2.2xlarge",
+        "i2.4xlarge",
+        "i2.8xlarge",
+        "r3.large",
+        "r3.xlarge",
+        "r3.2xlarge",
+        "r3.4xlarge",
+        "r3.8xlarge",
+        "t2.micro",
+        "t2.small",
+        "t2.medium"
+      ],
+      "Type": "String"
+    },
+    "DBSubnet2Cidr": {
+      "Description": "CIDR address range for the private database subnet to be created in the second AZ",
+      "Default": "10.183.101.0/24",
+      "Type": "String"
+    },
+    "AvailabilityZone2": {
+      "Default": "us-east-1b",
+      "Description": "Availability zone for the second set of subnets.",
+      "ConstraintDescription": "Must be a valid availability zone in the current region and different than AvailabilityZone1.",
+      "AllowedValues": [
+        "us-east-1a",
+        "us-east-1b",
+        "us-east-1d",
+        "us-east-1e"
+      ],
+      "Type": "String"
+    },
+    "WaitForInstanceStop": {
+      "Description": "The number of seconds to wait for alternate NAT Node to stop before attempting to stop it again",
+      "Default": "60",
+      "Type": "String"
+    },
+    "ServiceELBSubdomainName": {
+      "Default": "",
+      "MinLength": "0",
+      "Description": "Subdomain to register for services.  Do not include the base domain.  You must specify that as ServiceELBBaseDomainName.",
+      "ConstraintDescription": "Can contain only alphanumeric characters, dashes and periods.",
+      "AllowedPattern": "[\\-.a-zA-Z0-9]*",
+      "MaxLength": "64",
+      "Type": "String"
+    },
+    "DockerInstanceType": {
+      "Default": "m3.medium",
+      "Description": "EC2 instance type for the Docker autoscaling group",
+      "ConstraintDescription": "Must be a valid EC2 HVM instance type.",
+      "AllowedValues": [
+        "m3.medium",
+        "m3.large",
+        "m3.xlarge",
+        "m3.2xlarge",
+        "c3.large",
+        "c3.xlarge",
+        "c3.2xlarge",
+        "c3.4xlarge",
+        "c3.8xlarge",
+        "cc2.8xlarge",
+        "cr1.8xlarge",
+        "hi1.4xlarge",
+        "hs1.8xlarge",
+        "i2.xlarge",
+        "i2.2xlarge",
+        "i2.4xlarge",
+        "i2.8xlarge",
+        "r3.large",
+        "r3.xlarge",
+        "r3.2xlarge",
+        "r3.4xlarge",
+        "r3.8xlarge",
+        "t2.micro",
+        "t2.small",
+        "t2.medium"
+      ],
+      "Type": "String"
+    },
+    "PingTimeout": {
+      "Description": "The number of seconds to wait for each ping response before determining that the ping has failed",
+      "Default": "10",
+      "Type": "String"
+    },
+    "DockerRegistryUser": {
+      "Default": "nobody",
+      "MinLength": "0",
+      "Description": "User name for private Docker Registry",
+      "MaxLength": "60",
+      "Type": "String"
+    },
+    "ServiceELBSSLCertName": {
+      "Description": "Logical name for the SSL cert to associate with the service ELB.",
+      "Default": "",
+      "Type": "String"
+    },
+    "PublicSubnet2": {
+      "Description": "CIDR address range for the public subnet to be created in the second AZ",
+      "Default": "10.183.3.0/24",
+      "Type": "String"
+    },
+    "NumberOfPings": {
+      "Description": "The number of times the health check will ping the alternate NAT node",
+      "Default": "3",
+      "Type": "String"
+    },
+    "NATInstanceType": {
+      "Default": "t2.micro",
+      "Description": "Instance type for public subnet NAT nodes",
+      "ConstraintDescription": "Must be a valid EC2 instance type.",
+      "AllowedValues": [
+        "m3.medium",
+        "m3.large",
+        "m3.xlarge",
+        "m3.2xlarge",
+        "c3.large",
+        "c3.xlarge",
+        "c3.2xlarge",
+        "c3.4xlarge",
+        "c3.8xlarge",
+        "cc2.8xlarge",
+        "cr1.8xlarge",
+        "hi1.4xlarge",
+        "hs1.8xlarge",
+        "i2.xlarge",
+        "i2.2xlarge",
+        "i2.4xlarge",
+        "i2.8xlarge",
+        "r3.large",
+        "r3.xlarge",
+        "r3.2xlarge",
+        "r3.4xlarge",
+        "r3.8xlarge",
+        "t2.micro",
+        "t2.small",
+        "t2.medium"
+      ],
+      "Type": "String"
+    },
+    "ServiceClusterSize": {
+      "Default": "0",
+      "Description": "Number of nodes in cluster (0-12)",
+      "MinValue": "0",
+      "MaxValue": "12",
+      "Type": "Number"
+    },
+    "WebOAuthProviderBaseURL": {
+      "Default": "",
+      "MinLength": "0",
+      "Description": "Base URL for the OAuth provider.  Include https.",
+      "MaxLength": "64",
+      "Type": "String"
+    },
+    "CoreOSChannelAMI": {
+      "Default": "CoreOSStableAMI",
+      "Description": "MapName for the update channel AMI to use when launching CoreOS instances",
+      "ConstraintDescription": "Value should be 'CoreOSStableAMI', 'CoreOSBetaAMI', or 'CoreOSAlphaAMI'",
+      "AllowedValues": [
+        "CoreOSStableAMI",
+        "CoreOSBetaAMI",
+        "CoreOSAlphaAMI"
+      ],
+      "Type": "String"
+    },
+    "AutoScaleCooldown": {
+      "Default": "300",
+      "Description": "Time in seconds between autoscaling events",
+      "MinValue": "60",
+      "MaxValue": "3600",
+      "Type": "Number"
+    },
+    "WaitBetweenPings": {
+      "Description": "The number of seconds to wait between health checks",
+      "Default": "2",
+      "Type": "String"
+    },
+    "Team": {
+      "MinLength": "1",
+      "Description": "Team within the group responsible for this ecosystem of services",
+      "ConstraintDescription": "Can contain only alphanumeric characters, spaces, dashes and underscores.",
+      "AllowedPattern": "[-_ a-zA-Z0-9]*",
+      "MaxLength": "64",
+      "Type": "String"
+    },
+    "VpcCidr": {
+      "Description": "CIDR address range for the VPC to be created",
+      "Default": "10.183.0.0/16",
+      "Type": "String"
+    },
+    "PublicSubnet1": {
+      "Description": "CIDR address range for the public subnet to be created in the first AZ",
+      "Default": "10.183.1.0/24",
+      "Type": "String"
+    },
+    "AllowHTTPFrom": {
+      "Description": "The net block (CIDR) that can connect to the ELB.",
+      "Type": "String"
+    },
+    "Group": {
+      "MinLength": "1",
+      "Description": "Group responsible for this ecosystem of services",
+      "ConstraintDescription": "Can contain only alphanumeric characters, spaces, dashes and underscores.",
+      "AllowedPattern": "[-_ a-zA-Z0-9]*",
+      "MaxLength": "64",
+      "Type": "String"
+    },
+    "SwarmEnabled": {
+      "Description": "Use docker swarm.",
+      "Default": "",
+      "Type": "String"
+    },
+    "DBSubnet1Cidr": {
+      "Description": "CIDR address range for the private database subnet to be created in the first AZ",
+      "Default": "10.183.100.0/24",
+      "Type": "String"
+    },
+    "KeyName": {
+      "Description": "Name of an existing EC2 KeyPair to enable SSH access to the instances",
+      "ConstraintDescription": "Value must be a valid AWS key pair name in your account.",
+      "Type": "AWS::EC2::KeyPair::KeyName"
+    },
+    "Project": {
+      "MinLength": "1",
+      "Description": "Name for this ecosystem of services",
+      "ConstraintDescription": "Can contain only alphanumeric characters, spaces, dashes and underscores.",
+      "AllowedPattern": "[-_ a-zA-Z0-9]*",
+      "MaxLength": "64",
+      "Type": "String"
+    },
+    "PrivateSubnet1": {
+      "Description": "CIDR address range for the private subnet to be created in the first AZ",
+      "Default": "10.183.0.0/24",
+      "Type": "String"
+    },
+    "AllowSSHFrom": {
+      "Description": "The net block (CIDR) that SSH is available to.",
+      "Type": "String"
+    },
+    "AdvertisedIPAddress": {
+      "Description": "Use 'private' if your etcd cluster is within one region or 'public' if it spans regions or cloud providers.",
+      "Default": "private",
+      "AllowedValues": [
+        "private",
+        "public"
+      ],
+      "Type": "String"
+    },
+    "KeepAlive": {
+      "Description": "Boolean to indicate whether to allow resource to be kept alive during nightly reaping",
+      "ConstraintDescription": "Value should be 'true' or 'false'",
+      "AllowedValues": [
+        "true",
+        "false"
+      ],
+      "Type": "String"
+    },
+    "WaitForInstanceStart": {
+      "Description": "The number of seconds to wait for alternate NAT node to restart before resuming health checks again",
+      "Default": "300",
+      "Type": "String"
+    },
+    "WebELBSubdomainName": {
+      "Default": "",
+      "MinLength": "0",
+      "Description": "Subdomain to register for web content.  Do not include the base domain.  You must specify that as WebELBBaseDomainName.",
+      "ConstraintDescription": "Can contain only alphanumeric characters, dashes and periods.",
+      "AllowedPattern": "[\\-.a-zA-Z0-9]*",
+      "MaxLength": "64",
+      "Type": "String"
+    },
+    "WebELBBaseDomainName": {
+      "Default": "",
+      "MinLength": "0",
+      "Description": "Base domain to register for web content.  You must already have this domain setup in Route 53.",
+      "ConstraintDescription": "Can contain only alphanumeric characters, dashes and periods.  Do not include a trailing period. While Route 53 does require it, this template will add it.",
+      "AllowedPattern": "[\\-.a-zA-Z0-9]*",
+      "MaxLength": "64",
+      "Type": "String"
+    },
+    "Product": {
+      "MinLength": "1",
+      "Description": "Name for the customer-facing entity this project is associated with",
+      "ConstraintDescription": "Can contain only alphanumeric characters, spaces, dashes and underscores.",
+      "AllowedPattern": "[-_ a-zA-Z0-9]*",
+      "MaxLength": "64",
+      "Type": "String"
+    },
+    "ServiceELBBaseDomainName": {
+      "Default": "",
+      "MinLength": "0",
+      "Description": "Base domain to register for services.  You must already have this domain setup in Route 53.",
+      "ConstraintDescription": "Can contain only alphanumeric characters, dashes and periods.  Do not include a trailing period. While Route 53 does require it, this template will add it.",
+      "AllowedPattern": "[\\-.a-zA-Z0-9]*",
+      "MaxLength": "64",
+      "Type": "String"
+    },
+    "GatewayClusterSize": {
+      "Default": "2",
+      "Description": "Number of nodes in cluster (2-12)",
+      "MinValue": "2",
+      "MaxValue": "12",
+      "Type": "Number"
+    },
+    "Owner": {
+      "MinLength": "1",
+      "Description": "Individual responsible for this ecosystem of services",
+      "ConstraintDescription": "Can contain only alphanumeric characters, spaces, dashes and underscores.",
+      "AllowedPattern": "[-_ a-zA-Z0-9]*",
+      "MaxLength": "64",
+      "Type": "String"
+    },
+    "PrivateSubnet2": {
+      "Description": "CIDR address range for the private subnet to be created in the second AZ",
+      "Default": "10.183.2.0/24",
+      "Type": "String"
+    },
+    "AvailabilityZone1": {
+      "Default": "us-east-1a",
+      "Description": "Availability zone for the first set of subnets.",
+      "ConstraintDescription": "Must be a valid availability zone in the current region.",
+      "AllowedValues": [
+        "us-east-1a",
+        "us-east-1b",
+        "us-east-1d",
+        "us-east-1e"
+      ],
+      "Type": "String"
+    },
+    "WebELBSSLCertName": {
+      "Description": "Logical name for the SSL cert to associate with the web content ELB.",
+      "Default": "",
+      "Type": "String"
+    },
+    "DockerRegistryPass": {
+      "Default": "null",
+      "MinLength": "0",
+      "Description": "Password for private Docker Registry",
+      "NoEcho": true,
+      "MaxLength": "60",
+      "Type": "String"
+    },
+    "WebOAuthProvider": {
+      "Default": "ping",
+      "MinLength": "0",
+      "Description": "OAuth provider name. Must be a supported value in nginx-s3-oauth.",
+      "MaxLength": "64",
+      "Type": "String"
+    }
+  },
+  "Mappings": {
+    "AmazonLinuxAMI": {
+      "us-east-1": {
+        "AMI": "ami-146e2a7c"
+      },
+      "us-west-1": {
+        "AMI": "ami-42908907"
+      },
+      "us-west-2": {
+        "AMI": "ami-dfc39aef"
+      },
+      "eu-west-1": {
+        "AMI": "ami-9d23aeea"
+      }
+    },
+    "CoreOSStableAMI": {
+      "us-east-1": {
+        "AMI": "ami-d2033bba"
+      },
+      "us-west-1": {
+        "AMI": "ami-43f91b07"
+      },
+      "us-west-2": {
+        "AMI": "ami-37280207"
+      },
+      "eu-west-1": {
+        "AMI": "ami-21422356"
+      }
+    },
+    "CoreOSAlphaAMI": {
+      "us-east-1": {
+        "AMI": "ami-fe724896"
+      },
+      "us-west-1": {
+        "AMI": "ami-3500e271"
+      },
+      "us-west-2": {
+        "AMI": "ami-45d5ff75"
+      },
+      "eu-west-1": {
+        "AMI": "ami-b53252c2"
+      }
+    },
+    "CoreOSBetaAMI": {
+      "us-east-1": {
+        "AMI": "ami-1e536876"
+      },
+      "us-west-1": {
+        "AMI": "ami-47d93b03"
+      },
+      "us-west-2": {
+        "AMI": "ami-81153fb1"
+      },
+      "eu-west-1": {
+        "AMI": "ami-8d8cedfa"
+      }
+    },
+    "AWSNATAMI": {
+      "us-east-1": {
+        "AMI": "ami-184dc970"
+      },
+      "us-west-1": {
+        "AMI": "ami-a98396ec"
+      },
+      "us-west-2": {
+        "AMI": "ami-290f4119"
+      },
+      "eu-west-1": {
+        "AMI": "ami-14913f63"
+      }
+    }
+  },
+  "Conditions": {
+    "ServiceELBSubdomainNameIsDefined": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "ServiceELBSubdomainName"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "ServiceELBSubdomainNameIsDefinedAndSSLIsNotDefined": {
+      "Fn::And": [
+        {
+          "Fn::Not": [
+            {
+              "Fn::Equals": [
+                {
+                  "Ref": "ServiceELBSubdomainName"
+                },
+                ""
+              ]
+            }
+          ]
+        },
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "ServiceELBSSLCertName"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "WebELBSSLCertNameIsDefined": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "WebELBSSLCertName"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "WebELBSubdomainNameIsDefinedAndSSLIsNotDefined": {
+      "Fn::And": [
+        {
+          "Fn::Not": [
+            {
+              "Fn::Equals": [
+                {
+                  "Ref": "WebELBSubdomainName"
+                },
+                ""
+              ]
+            }
+          ]
+        },
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "WebELBSSLCertName"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "ServiceELBSSLCertNameIsNotDefined": {
+      "Fn::Equals": [
+        {
+          "Ref": "ServiceELBSSLCertName"
+        },
+        ""
+      ]
+    },
+    "WebELBSubdomainNameAndSSLIsDefined": {
+      "Fn::And": [
+        {
+          "Fn::Not": [
+            {
+              "Fn::Equals": [
+                {
+                  "Ref": "WebELBSubdomainName"
+                },
+                ""
+              ]
+            }
+          ]
+        },
+        {
+          "Fn::Not": [
+            {
+              "Fn::Equals": [
+                {
+                  "Ref": "WebELBSSLCertName"
+                },
+                ""
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "ServiceELBSubdomainNameAndSSLIsDefined": {
+      "Fn::And": [
+        {
+          "Fn::Not": [
+            {
+              "Fn::Equals": [
+                {
+                  "Ref": "ServiceELBSubdomainName"
+                },
+                ""
+              ]
+            }
+          ]
+        },
+        {
+          "Fn::Not": [
+            {
+              "Fn::Equals": [
+                {
+                  "Ref": "ServiceELBSSLCertName"
+                },
+                ""
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "SwarmEnabled": {
+      "Fn::Equals": [
+        {
+          "Ref": "SwarmEnabled"
+        },
+        "true"
+      ]
+    },
+    "WebELBSubdomainNameIsDefined": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "WebELBSubdomainName"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "ServiceELBSSLCertNameIsDefined": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "ServiceELBSSLCertName"
+            },
+            ""
+          ]
+        }
+      ]
+    },
+    "WebELBSSLCertNameIsNotDefined": {
+      "Fn::Equals": [
+        {
+          "Ref": "WebELBSSLCertName"
+        },
+        ""
+      ]
+    }
+  },
+  "Outputs": {
+    "ServiceLeader3IP": {
+      "Description": "Service Leader 3 Instance Private IP",
+      "Value": {
+        "Fn::GetAtt": [
+          "ServiceLeaderInstance3",
+          "PrivateIp"
+        ]
+      }
+    },
+    "ServiceLeader1IP": {
+      "Description": "Service Leader 1 Instance Private IP",
+      "Value": {
+        "Fn::GetAtt": [
+          "ServiceLeaderInstance1",
+          "PrivateIp"
+        ]
+      }
+    },
+    "DBPrivateSubnet1": {
+      "Description": "Database Private Subnet #1",
+      "Value": {
+        "Ref": "DBPriSubnet1"
+      }
+    },
+    "DBSubnetGroup": {
+      "Description": "Database Subnet Group",
+      "Value": {
+        "Ref": "DBSubnetGroup"
+      }
+    },
+    "BastionEIP": {
+      "Description": "Bastion Host EIP",
+      "Value": {
+        "Ref": "BastionEIP"
+      }
+    },
+    "PublicSubnet2": {
+      "Description": "Public Subnet #2",
+      "Value": {
+        "Ref": "PubSubnet2"
+      }
+    },
+    "NAT1EIP": {
+      "Description": "NAT 1 EIP",
+      "Value": {
+        "Ref": "NAT1EIP"
+      }
+    },
+    "GatewayDNS": {
+      "Description": "Service ELB DNS Name",
+      "Value": {
+        "Fn::If": [
+          "ServiceELBSSLCertNameIsNotDefined",
+          {
+            "Fn::GetAtt": [
+              "GatewayELB",
+              "DNSName"
+            ]
+          },
+          {
+            "Fn::GetAtt": [
+              "GatewayELBSSL",
+              "DNSName"
+            ]
+          }
+        ]
+      }
+    },
+    "DBVPCSecurityGroup": {
+      "Description": "Database VPC Security Group",
+      "Value": {
+        "Ref": "RDSSecurityGroup"
+      }
+    },
+    "WebFriendlyDNS": {
+      "Description": "Friendly DNS name registered for the web layer",
+      "Value": {
+        "Fn::If": [
+          "WebELBSubdomainNameIsDefined",
+          {
+            "Fn::Join": [
+              ".",
+              [
+                {
+                  "Ref": "WebELBSubdomainName"
+                },
+                {
+                  "Ref": "WebELBBaseDomainName"
+                }
+              ]
+            ]
+          },
+          ""
+        ]
+      }
+    },
+    "ServiceLeader2IP": {
+      "Description": "Service Leader 2 Instance Private IP",
+      "Value": {
+        "Fn::GetAtt": [
+          "ServiceLeaderInstance2",
+          "PrivateIp"
+        ]
+      }
+    },
+    "WebDNS": {
+      "Description": "Web ELB DNS Name",
+      "Value": {
+        "Fn::If": [
+          "WebELBSSLCertNameIsNotDefined",
+          {
+            "Fn::GetAtt": [
+              "WebELB",
+              "DNSName"
+            ]
+          },
+          {
+            "Fn::GetAtt": [
+              "WebELBSSL",
+              "DNSName"
+            ]
+          }
+        ]
+      }
+    },
+    "StaticContentS3Bucket": {
+      "Description": "S3 Bucket for static content",
+      "Value": {
+        "Ref": "StaticContentS3Bucket"
+      }
+    },
+    "DBPrivateSubnet2": {
+      "Description": "Database Private Subnet #2",
+      "Value": {
+        "Ref": "DBPriSubnet2"
+      }
+    },
+    "PublicSubnet1": {
+      "Description": "Public Subnet #1",
+      "Value": {
+        "Ref": "PubSubnet1"
+      }
+    },
+    "PrivateSubnet1": {
+      "Description": "Private Subnet #1",
+      "Value": {
+        "Ref": "PriSubnet1"
+      }
+    },
+    "ServiceCoreOSSecurityGroup": {
+      "Description": "Security CoreOS Security Group",
+      "Value": {
+        "Ref": "ServiceCoreOSSecurityGroup"
+      }
+    },
+    "NAT2EIP": {
+      "Description": "NAT 2 EIP",
+      "Value": {
+        "Ref": "NAT2EIP"
+      }
+    },
+    "ServiceFriendlyDNS": {
+      "Description": "Friendly DNS name registered for the service layer",
+      "Value": {
+        "Fn::If": [
+          "ServiceELBSubdomainNameIsDefined",
+          {
+            "Fn::Join": [
+              ".",
+              [
+                {
+                  "Ref": "ServiceELBSubdomainName"
+                },
+                {
+                  "Ref": "ServiceELBBaseDomainName"
+                }
+              ]
+            ]
+          },
+          ""
+        ]
+      }
+    },
+    "VPCID": {
+      "Description": "VPC Info",
+      "Value": {
+        "Ref": "VPC"
+      }
+    },
+    "PrivateSubnet2": {
+      "Description": "Private Subnet #2",
+      "Value": {
+        "Ref": "PriSubnet2"
+      }
+    }
+  }
+}

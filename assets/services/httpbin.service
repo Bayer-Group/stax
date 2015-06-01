@@ -1,0 +1,12 @@
+[Unit]
+Description=Httpbin
+After=docker.service
+Requires=docker.service
+
+[Service]
+TimeoutStartSec=0
+ExecStartPre=-/usr/bin/docker kill httpbin
+ExecStartPre=-/usr/bin/docker rm httpbin
+ExecStartPre=/usr/bin/docker pull citizenstig/httpbin:latest
+ExecStart=/usr/bin/docker run --name httpbin -P citizenstig/httpbin:latest
+ExecStop=/usr/bin/docker stop httpbin

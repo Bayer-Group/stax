@@ -1,0 +1,48 @@
+[Unit]
+Description=Kibana
+
+# Requirements
+Requires=docker.service
+Requires=etcd.service
+Requires=fleet.service
+
+# Dependency ordering and binding
+After=docker.service
+After=etcd.service
+After=fleet.service
+
+[Service]
+TimeoutStartSec=10m
+Restart=on-failure
+RestartSec=5s
+
+# Get CoreOS environmental variables
+EnvironmentFile=/etc/environment
+Environment="ES_CLUSTER=es01"
+
+ExecStartPre=-/usr/bin/docker stop %p
+ExecStartPre=-/usr/bin/docker kill %p
+ExecStartPre=/usr/bin/docker pull monsantoco/kibana:v4.0.2
+
+ExecStart=/bin/bash -c "\
+  /usr/bin/docker run --name %p \
+  --publish 5601:5601 \
+  --env ES_URL=elasticsearch-proxy:9200 \
+  --env SERVICE_NAME=%p \
+  --dns $(ip route | awk '/docker0/ { print $NF }') \
+  --dns-search service.consul \
+  monsantoco/kibana:v4.0.2"
+
+ExecStartPost=/usr/bin/curl -L http://${COREOS_PRIVATE_IPV4}:4001/v2/keys/services/logging/kibana/host/${COREOS_PRIVATE_IPV4} -XPUT -d value="%H"
+
+ExecStop=-/usr/bin/docker stop %p
+ExecStop=-/usr/bin/docker kill %p
+ExecStop=-/usr/bin/docker rm %p
+
+ExecStopPost=/usr/bin/curl -L http://${COREOS_PRIVATE_IPV4}:4001/v2/keys/services/logging/kibana/host/${COREOS_PRIVATE_IPV4} -XDELETE
+
+[Install]
+WantedBy=multi-user.target
+
+[X-Fleet]
+Conflicts=%p.service

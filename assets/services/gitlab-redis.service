@@ -1,0 +1,11 @@
+[Unit]
+Description=Redis for gitlab
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStartPre=-/usr/bin/docker kill gitlab-redis
+ExecStartPre=-/usr/bin/docker rm gitlab-redis
+ExecStartPre=/usr/bin/docker pull philcryer/min-redis:latest
+ExecStart=/usr/bin/docker run --name gitlab-redis -v /opt/redis:/var/lib/redis philcryer/min-redis:latest
+ExecStop=/usr/bin/docker stop gitlab-redis

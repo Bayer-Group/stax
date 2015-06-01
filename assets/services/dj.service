@@ -1,0 +1,16 @@
+[Unit]
+Description=DJ (Docker janitor) clears out stopped containers and unused images
+
+After=docker.service
+Requires=docker.service
+
+[Service]
+SuccessExitStatus=1 123
+Type=simple
+ExecStart=/bin/bash -c 'docker ps -aq --no-trunc -f status=exited | xargs --no-run-if-empty docker rm -v && docker images -a -q | xargs --no-run-if-empty docker rmi -f'
+
+[Install]
+WantedBy=multi-user.target
+
+[X-Fleet]
+MachineOf=dj.timer

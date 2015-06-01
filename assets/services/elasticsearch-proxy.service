@@ -1,0 +1,77 @@
+[Unit]
+Description=Elasticsearch Proxy
+
+# Requirements
+Requires=docker.service
+Requires=etcd.service
+Requires=fleet.service
+
+# Dependency ordering and binding
+After=docker.service
+After=etcd.service
+After=fleet.service
+
+[Service]
+TimeoutStartSec=10m
+Restart=on-failure
+RestartSec=10s
+
+LimitNOFILE=65535
+LimitMEMLOCK=infinity
+
+# Set environmental variables
+EnvironmentFile=/etc/environment
+Environment="ES_CLUSTER=es01"
+
+LimitNOFILE=65535
+LimitMEMLOCK=infinity
+
+ExecStartPre=-/usr/bin/docker kill %p
+ExecStartPre=-/usr/bin/docker rm %p
+ExecStartPre=/usr/bin/docker pull monsantoco/elasticsearch:v1.5.0
+
+ExecStart=/bin/bash -c '\
+  curl -sf ${COREOS_PRIVATE_IPV4}:4001/v2/keys/services/logging/es/${ES_CLUSTER}/host > /dev/null ;\
+  if [ $? -eq 0 ]; then \
+    UNICAST_HOSTS=$(for key in $(etcdctl ls --recursive /services/logging/es/${ES_CLUSTER}/host); do \
+      ip=$(echo $key | cut -d/ -f7) ;\
+      port=$(etcdctl get $key | cut -d, -f3 | cut -d: -f2 | tr -d "} ") ;\
+      echo "$ip:$port" ;\
+    done | paste -s -d",") ;\
+  else \
+    UNICAST_HOSTS="" ;\
+  fi ;\
+  /usr/bin/docker run \
+    --name %p \
+    --publish 9200:9200 \
+    --publish 9300:9300 \
+    --env ES_CLUSTER=${ES_CLUSTER} \
+    --env SERVICE_NAME=%p \
+    --dns $(ip route | awk \'/docker0/ { print $NF }\') \
+    --dns-search service.consul \
+    monsantoco/elasticsearch:v1.5.0 \
+    --node.name=%p \
+    --node.data=false \
+    --node.master=false \
+    --network.publish_host=${COREOS_PRIVATE_IPV4} \
+    --discovery.zen.ping.multicast.enabled=false \
+    --discovery.zen.ping.unicast.hosts=$UNICAST_HOSTS'
+
+ExecStartPost=/usr/bin/curl -L http://${COREOS_PRIVATE_IPV4}:4001/v2/keys/services/logging/es/${ES_CLUSTER}/proxy/${COREOS_PRIVATE_IPV4} -XPUT -d value='{"host":"%H","http_port":9200,"cluster_port":9300}'
+
+ExecStop=-/usr/bin/docker stop %p
+ExecStop=-/usr/bin/docker kill %p
+ExecStop=-/usr/bin/docker rm %p
+
+ExecStopPost=/usr/bin/bash -c '\
+  if [ $(etcdctl ls --recursive /services/logging/es/${ES_CLUSTER}/proxy | wc -l) -le 2 ]; then \
+    curl -L http://${COREOS_PRIVATE_IPV4}:4001/v2/keys/services/logging/es/${ES_CLUSTER}/proxy?recursive=true -XDELETE ;\
+  else \
+    curl -L http://${COREOS_PRIVATE_IPV4}:4001/v2/keys/services/logging/es/${ES_CLUSTER}/proxy/${COREOS_PRIVATE_IPV4} -XDELETE ;\
+  fi'
+
+[Install]
+WantedBy=multi-user.target
+
+[X-Fleet]
+Conflicts=elasticsearch@*.service

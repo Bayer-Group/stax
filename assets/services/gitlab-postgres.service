@@ -1,0 +1,14 @@
+[Unit]
+Description=Postgres for gitlab
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStartPre=-/usr/bin/docker kill gitlab-postgres
+ExecStartPre=-/usr/bin/docker rm gitlab-postgres
+ExecStartPre=/usr/bin/docker pull postgres:9.4.0
+ExecStart=/usr/bin/docker run --name gitlab-postgres -e 'DB_NAME=gitlabhq_production' -e 'DB_USER=gitlab' -e 'DB_PASS=dockerrules!'  -v /opt/redis:/var/lib/redis postgres:9.4.0
+ExecStop=/usr/bin/docker stop gitlab-postgres
+
+[X-Fleet]
+MachineOf=gitlab-redis.service

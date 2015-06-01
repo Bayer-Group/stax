@@ -1,0 +1,19 @@
+[Unit]
+Description=RDS Logging Service
+
+[Service]
+TimeoutStartSec=10m
+Restart=on-failure
+RestartSec=5s
+
+# Set environmental variables
+EnvironmentFile=/etc/environment
+
+ExecStartPre=-/usr/bin/docker kill %p
+ExecStartPre=/usr/bin/docker pull cgswong/aws:latest
+
+ExecStart=/usr/bin/docker run --name %p cgswong/aws:latest rds-watch-db-logfile $DBINST --log-file-name error/postgres.log >&2 -I $AWS_ACCESS_KEY_ID -S $AWS_SECRET_KEY
+
+ExecStop=-/usr/bin/docker stop %p
+ExecStop=-/usr/bin/docker kill %p
+ExecStop=-/usr/bin/docker rm %p

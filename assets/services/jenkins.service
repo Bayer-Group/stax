@@ -1,0 +1,11 @@
+[Unit]
+Description=Jenkins
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStartPre=-/usr/bin/docker kill jenkins
+ExecStartPre=-/usr/bin/docker rm jenkins
+ExecStartPre=/usr/bin/docker pull monsantoco/jenkins-docker:latest
+ExecStart=/usr/bin/docker run --name jenkins -P -v /var/run/docker.sock:/var/run/docker.sock monsantoco/jenkins-docker:latest
+ExecStop=/usr/bin/docker stop jenkins

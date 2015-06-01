@@ -1,0 +1,2027 @@
+#! /bin/bash
+#####################################################################
+#   stax - creates and manages CloudFormation stacks in AWS
+#   See LICENSE file for license - See README.md file for details
+#####################################################################
+
+# variables
+pkg="stax"
+version="0.10"
+script_path=$(cd $(dirname $0); pwd -P)
+system=$(uname)
+STAX_DIR="$script_path/run"
+STAX_NAME_FILE="$STAX_DIR/stax-name"
+stax_log="$STAX_DIR/stax.log"
+SSH_OPTIONS="-q"
+host=$(hostname)
+
+# create a dir to store stax stuff
+if [[ ! -d $STAX_DIR ]]; then
+    if ! mkdir -p "$STAX_DIR"; then
+        echo "$pkg: failed to make run directory: $STAX_DIR"
+        exit 1
+    fi
+    if ! chmod 700 "$STAX_DIR"; then
+        echo "$pkg: failed to chmod $STAX_DIR"
+        exit 1
+    fi
+fi
+# create audit dir for stax
+if [[ ! -d $STAX_DIR/audit ]]; then
+    if ! mkdir -p "$STAX_DIR/audit"; then
+        echo "$pkg: failed to make audit directory: $STAX_DIR/audit"
+        exit 1
+    fi
+fi
+
+# set colors
+red=$(tput setaf 1)
+green=$(tput setaf 2)
+yellow=$(tput setaf 3)
+blue=$(tput setaf 4)
+purple=$(tput setaf 5)
+cyan=$(tput setaf 6)
+white=$(tput setaf 7)
+reset=$(tput sgr0)
+
+stax-message(){
+    declare msg="$1"
+    stax-logger "INFO: $msg"
+    [[ $quiet ]] && return
+    shift
+    pref="----"
+    if [[ $1 ]]; then
+        pref="${1:0:4}"
+        shift
+    fi
+    echo "${yellow}[ $cyan$pref$yellow ]$reset  $msg"
+}
+
+stax-error(){
+    declare msg="$1"
+    stax-logger "ERROR: $msg"
+    echo "${yellow}[ ${red}ERRR$yellow ]$reset  $msg"
+}
+
+stax-error-exit(){
+    declare msg="$1"
+    declare status="$2"
+    stax-error "$msg"
+    exit $status
+}
+
+stax-logger(){
+    declare msg="$1"
+    if [[ ! $stax_log ]]; then
+        echo "$pkg: cannot call stax-logger with stax_log undefined"
+        exit 5
+    fi
+    echo "$(date +'%b %d %T') $host $pkg: $msg" >> "$stax_log"
+}
+
+stax-usage(){
+    cat <<EOM
+Usage: stax [OPTIONS] COMMAND [COMMAND_ARGS]
+
+Options:
+  -c,--config=CONFIG       Use file CONFIG rather than config/vpc-default.json
+  -d,--debug               Turn on verbose messages
+  -h,--help                Output this message
+  -j,--jump=IP             SSH through host with IP address IP
+  -m,--module=MOD          Use config/MOD.json and template/MOD.json
+  -q,--quiet               Mute status messages
+  -t,--template=TEMPLATE   Use file TEMPLATE rather than template/vpc-default.json
+  -v,--version             Print name and version information
+  -y,--yes                 Do not prompt for confirmation
+
+If an argument is required for a long option, so to the short. Same for
+optional arguments.
+
+Commands:
+  add                Add functionality to an existing VPC
+  add-logger         Add logging functionality to an existing VPC
+  auto-services      Lanch multiple services on fleet using template/NAME.services file
+  check              Run various tests against an existing stax
+  connect [TARGET]   Connect to bastion|gateway|service in the VPC stax over SSH
+  create             Create a new VPC stax in AWS
+  describe           Describe the stax created from this host
+  delete             Delete the existing VPC stax
+  dockerip-update    Fetch docker IP addresses and update related files
+  fleet              Run various fleetctl commands against the fleet cluster
+  help               Output this message
+  history            View history of recently created/deleted stax
+  list               List all completely built and running stax
+  rds PASSWORD       Create an RDS instance in the DB subnet
+  rds-delete RDSIN   Delete RDS instance RDSIN
+  remove ADD         Remove the previously added ADD
+  services           List servers that are available to run across a stax
+  slack              Post usage report to Slack, define hook in stax.config
+  sleep              Turn on/off bastion host which allows ssh access into the VPC
+  start SERVICE      Start service SERVICE in the fleet cluster
+  test               Automated test to exercise functionality of stax
+  update             Update an existing VPC with changes from Cloudformation
+  validate           Validate CloudFormation template
+
+For more help, check the docs: https://github.com/MonsantoCo/stax
+EOM
+}
+
+stax-logo(){
+    [[ $quiet ]] && return
+    NUMS=`wc -l < assets/stax/slogans`
+    echo "${green}     _             "
+    echo "    | | ${yellow}`head -$((${RANDOM} % ${NUMS} + 1)) assets/stax/slogans | tail -1`${green}"
+    echo " ___| |_ __ ___  __"
+    echo '/ __| __/ _` \ \/ /'
+    echo '\__ \ || (_| |>  < '
+    echo "|___/\__\__,_/_/\_\ ${reset} `echo $version`"
+    echo
+}
+
+stax-preflight(){
+    # check for required cli tools
+    for cli in aws ssh; do
+        if ! type "$cli" > /dev/null 2>&1; then
+            stax-error-exit "$pkg: $cli is not in the PATH. Aborting." 1
+        fi
+    done
+    # check if awscli tools are configured
+    if [[ ! -f $HOME/.aws/config ]]; then
+        stax-error-exit "awscli not configured, run 'aws configure'. Aborting." 1
+    fi
+    # check for jq, use system installed version if found, otherwise use bundled
+    if which jq > /dev/null; then
+        jq=$(which jq)
+    else
+        jq="assets/jq/$system/jq"
+        if [[ ! -f $jq ]]; then
+            stax-error-exit "no viable jq binary found, Aborting." 1
+        fi
+    fi
+    # determine which way to reverse cat a file
+    if [[ $system == Linux ]]; then
+        tac=tac
+    elif [[ $system == Darwin ]]; then
+        tac="tail -r"
+    else
+        stax-error-exit "unsupported platform: $system" 1
+    fi
+    if [ -f "$HOME/.stax.config" ]; then
+        source $HOME/.stax.config
+    fi
+    tag_prefix=${STAX_TAG_PREFIX:-"stax"}
+}
+
+stax-create-key(){
+    stax-message "creating ssh key pair in aws"
+    STAX_KEY="$STAX_NAME"
+    STAX_PRIV_KEY="$STAX_DIR/$STAX_NAME.pem"
+    touch "$STAX_PRIV_KEY"
+    chmod 600 "$STAX_PRIV_KEY"
+    stax-message "  creating key pair"
+    if ! aws ec2 create-key-pair --key-name "$STAX_NAME" --query 'KeyMaterial' --output text > "$STAX_PRIV_KEY"; then
+        stax-error "failed to create key pair in aws"
+        return 1
+    fi
+    stax-message "  key pair created"
+    stax-message "  generating public key"
+    STAX_PUB_KEY="$STAX_PRIV_KEY.pub"
+    if ! ssh-keygen -y -f "$STAX_PRIV_KEY" > "$STAX_PUB_KEY"; then
+        stax-error "failed to generate public key from private key: $STAX_PRIV_KEY $STAX_PUB_KEY"
+        stax-delete-key
+        return 1
+    fi
+    stax-message "  public key generated"
+}
+
+stax-create-bucket(){
+    stax-message "create bucket"
+    bucket="$STAX_NAME"
+    if [[ $1 ]]; then
+        bucket="$1"
+    fi
+    if [[ ! $bucket ]]; then
+        stax-error-exit "you must supply the name for the bucket to be created" 5
+    fi
+    stax-message "  creating bucket $bucket"
+    if ! aws s3 mb "s3://$bucket" > /dev/null; then
+        stax-error "failed to create bucket: $bucket"
+        return 1
+    fi
+    stax-message "  created bucket $bucket"
+}
+
+stax-upload-template(){
+    if [[ ! $1 ]]; then
+        stax-error "stax-upload-template requires the template path as an argument"
+        return 10
+    fi
+    template_path="$1"
+    target_base="$STAX_NAME"
+    if [[ $2 ]]; then
+        target_base="$2"
+    fi
+    if [[ ! -f $template_path ]]; then
+        stax-error "template file not found: $template_path"
+        return 1
+    fi
+    template_s3="$STAX_NAME/$target_base.json"
+    stax-message "  uploading template"
+    if ! aws s3 cp --sse "$template_path" "s3://$template_s3" > /dev/null; then
+        stax-error "failed to copy $template_path to s3"
+        return 1
+    fi
+    STAX_TEMPLATE_URL="https://s3.amazonaws.com/$template_s3"
+    stax-message "  template uploaded to $STAX_TEMPLATE_URL"
+}
+
+stax-validate-template(){
+    stax-message "validate template"
+    if [[ ! $STAX_TEMPLATE_URL ]]; then
+        stax-error "cannot call stax-validate-template without defining STAX_TEMPLATE_URL first"
+        stax-error "call stax-upload-template first"
+        return 10
+    fi
+    template_url="$STAX_TEMPLATE_URL"
+    stax-message "  validating template $template_url"
+    if ! aws cloudformation validate-template --template-url "$template_url" > /dev/null; then
+        stax-error "template failed to validate, exiting"
+        return 1
+    fi
+    stax-message "  validated template $template_url"
+}
+
+stax-validate(){
+    stax-message "validate template"
+    if [[ ! $1 ]]; then
+        stax-error "stax-validate requires the template path as an argument"
+        return 10
+    fi
+    template_path="$1"
+    if ! stax-generate; then
+        stax-error "failed to set up stax"
+        return 1
+    fi
+    if ! $jq . "$template_path" >/dev/null; then
+        stax-error "template $template_path failed jq validation, see error above"
+        return 1
+    fi
+    if ! stax-create-bucket; then
+        stax-error "failed to create bucket for upload"
+        return 1
+    fi
+    if ! stax-upload-template "$template_path"; then
+        stax-delete-bucket
+        stax-error "failed to upload template"
+        return 1
+    fi
+    if ! stax-validate-template; then
+        stax-delete-bucket
+        stax-error "failed to validate template"
+        return 1
+    fi
+    if ! stax-delete-bucket; then
+        stax-error "failed to delete bucket, please do so manually"
+        return 1
+    fi
+}
+
+stax-add(){
+    stax-message "adding template to existing vpc"
+    if [[ $# != 2 ]]; then
+        stax-error "stax-add: you must provide the template and config file"
+        return 10
+    fi
+    template_path="$1"
+    config="$2"
+    postfix=$(stax-generate-random)
+    if [[ $? != 0 ]]; then
+        stax-error "failed to generate name for add"
+        return 1
+    fi
+    STAX_NAME_ADD="$STAX_NAME-add-$postfix"
+    stax-message "$STAX_NAME_ADD" "NAME"
+    if ! stax-add-config "$config"; then
+        stax-error "failed to create parameter file"
+        return 1
+    fi
+    stax-message "  checking for valid json file format"
+    if ! $jq . "$template_path" >/dev/null; then
+        stax-error "template $template_path failed jq validation, see error above"
+        rm -f $STAX_ADD_PARAMS
+        return 1
+    fi
+    if ! stax-upload-template "$template_path" "$STAX_NAME_ADD"; then
+        stax-error "failed to upload template to s3: $template_path"
+        rm -f $STAX_ADD_PARAMS
+        return 1
+    fi
+    if ! stax-validate-template; then
+        stax-error "template did not validate: $template_path"
+        aws s3 rm "s3://$STAX_NAME/$STAX_NAME_ADD.json" > /dev/null
+        rm -f $STAX_ADD_PARAMS
+        return 1
+    fi
+    stax-message "  adding $template_path to stax"
+    if ! aws cloudformation create-stack \
+        --stack-name "$STAX_NAME_ADD" \
+        --template-url "$STAX_TEMPLATE_URL" \
+        --parameters "$(<$STAX_ADD_PARAMS)" > /dev/null
+    then
+        stax-error "creation of $template_path failed"
+        aws s3 rm "s3://$STAX_NAME/$STAX_NAME_ADD.json" > /dev/null
+        rm -f $STAX_ADD_PARAMS
+        return 1
+    fi
+    date=$(date +'%Y%m%d-%H%M%S')
+    touch "$STAX_DIR/audit/$STAX_NAME/$date-added-$STAX_NAME_ADD"
+    if mkdir -p "$STAX_DIR/audit/$STAX_NAME_ADD"; then
+        touch "$STAX_DIR/audit/$STAX_NAME_ADD/$date-created"
+    else
+        stax-error "failed to create audit directory: $STAX_DIR/audit/$STAX_NAME_ADD"
+        stax-error "please create the audit directory yourself"
+    fi
+    if ! echo "$STAX_NAME_ADD" >> "$STAX_DIR/$STAX_NAME.add"; then
+        stax-error "failed to add $STAX_NAME_ADD to add file: $STAX_DIR/$STAX_NAME.add"
+        stax-error "this will create problems when trying to delete this stack"
+        return 2
+    fi
+    stax-message "  stax addition complete"
+}
+
+stax-add-logger(){
+    stax-message "adding logger functionality to existing vpc"
+    stax-message "   ready to do the needful"
+    stax-message "     - starting elasticsearch"
+    stax-start-service elasticsearch
+    stax-start-service logstash
+    stax-start-service logspout
+    stax-start-service kibana
+    date=$(date +'%Y%m%d-%H%M%S')
+    touch "$STAX_DIR/audit/$STAX_NAME/$date-added-logger"
+    if mkdir -p "$STAX_DIR/audit/${STAX_NAME}-logger"; then
+        touch "$STAX_DIR/audit/$STAX_NAME-logger/${date}-added"
+    else
+        stax-error "failed to create audit directory: $STAX_DIR/audit/$STAX_NAME$date-added-logger"
+        stax-error "please create the audit directory yourself"
+    fi
+    if ! echo "logger-added" >> "$STAX_DIR/$STAX_NAME.add"; then
+        stax-error "failed to add logger-added to add file: $STAX_DIR/$STAX_NAME.add"
+        stax-error "this will create problems when trying to delete this stack"
+        return 2
+    fi
+    stax-message "  stax add-logger complete - current cluster status from fleet"
+    sleep 5
+    stax-fleetstats
+}
+
+stax-remove(){
+    stax-message "removing add"
+    if [[ ! $1 ]]; then
+        stax-error "stax-remove: you must supply the name of the addition to remove"
+        return 10
+    fi
+    addition="$1"
+    stax-message "  removing $addition"
+    if ! grep -q "^$addition\$" "$STAX_DIR/$STAX_NAME.add" > /dev/null 2>&1; then
+        stax-error "unknown addition: $addition"
+        return 1
+    fi
+    if ! aws cloudformation delete-stack --stack-name "$addition" > /dev/null; then
+        stax-error "removal failed: $addition"
+        return 1
+    fi
+    if ! sed -i.bak "/^$addition\$/d" "$STAX_DIR/$STAX_NAME.add"; then
+        stax-error "failed to remove $addition from $STAX_DIR/$STAX_NAME.add"
+        stax-error "this may cause problems when deleting the stack"
+        return 2
+    fi
+    rm -f "$STAX_DIR/$STAX_NAME.add.bak"
+    stax-message "  removal complete"
+    date=$(date +'%Y%m%d-%H%M%S')
+    touch "$STAX_DIR/audit/$STAX_NAME/$date-removed-$addition"
+    touch "$STAX_DIR/audit/$addition/$date-delete"
+}
+
+stax-template-find() {
+    if [[ -f "$1" ]]; then
+        echo "$1"
+    else
+        base="${1##*/}"
+        base="${base%%.json}"
+        temp="template/$base.json"
+        if [[ -f $temp ]]; then
+            echo "$temp"
+        else
+            return 1
+        fi
+    fi
+}
+
+stax-parameter-tag(){
+    if [[ ! $1 ]]; then
+        stax-error "stax-parameter-tag require the parameter name as an argument"
+        return 10
+    fi
+    if [[ ! $STAX_PARAMS ]]; then
+        stax-error "STAX_PARAMS must be defined when calling stax-parameter-tag"
+        return 10
+    fi
+    if [[ ! -f $STAX_PARAMS ]]; then
+        stax-error "parameter file does not exist: $STAX_PARAMS"
+        return 10
+    fi
+    param="$1"
+    tag_value=$($jq --raw-output ".[] | select(.ParameterKey==\"$param\").ParameterValue" "$STAX_PARAMS")
+    if [[ $? != 0 || ! $tag_value ]]; then
+        echo "failed to parse $STAX_PARAMS for parameter $param"
+        return 1
+    fi
+    tag_name=$(echo $param | sed 's/\(.\)\([[:upper:]]\)/\1-\2/g' | tr '[:upper:]' '[:lower:]')
+    if [[ $? != 0 || ! $tag_name ]]; then
+        echo "failed to create tag name from for parameter $param"
+        return 1
+    fi
+    tag_name="$tag_prefix:$tag_name"
+    echo "{\"Key\":\"$tag_name\",\"Value\":\"$tag_value\"}"
+}
+
+stax-update(){
+    stax-message "updating existing stax $STAX_NAME"
+    if [[ ! $1 ]]; then
+        stax-error-exit "stax-update takes the template path as an argument" 10
+    fi
+    template_path="$(stax-template-find $1)"
+    if [[ $? != 0 || ! $template_path ]]; then
+        stax-error-exit "could not find template $1" 1
+    fi
+    if ! stax-config; then
+        stax-error-exit "failed to generate updated stax config" 1
+    fi
+    if [[ ! -f $template_path ]]; then
+        stax-error-exit "updated template file does not exist: $template_path" 1
+    fi
+    stax-message "  checking template for valid json file format"
+    if ! $jq . "$template_path" >/dev/null; then
+        stax-delete-files
+        stax-error-exit "template $template_path failed jq validation, see error above" 1
+    fi
+    if ! stax-upload-template "$template_path"; then
+        stax-delete-bucket
+        stax-delete-key
+        stax-delete-files
+        stax-error-exit "failed to upload template to s3" 1
+    fi
+    if ! stax-validate-template; then
+        stax-delete-bucket
+        stax-delete-key
+        stax-delete-files
+        stax-error-exit "failed to validate template" 1
+    fi
+    ti=0
+    template_save="run/$STAX_NAME.template$ti"
+    while [[ -f $template_save ]]; do
+        template_save="run/$STAX_NAME.template$((++ti))"
+    done
+    if ! cp "$template_path" "$template_save"; then
+        stax-error "failed to save template $template_path, continuing"
+    fi
+    stax-message "  uploading updated vpc assets"
+    for f in assets/vpc/*; do
+        if ! aws s3 cp --sse "$f" "s3://$STAX_NAME/" > /dev/null; then
+            stax-error "failed to upload file $f to bucket $STAX_NAME"
+            stax-delete-bucket
+            stax-delete-key
+            stax-delete-files
+            stax-error-exit "asset upload failed" 1
+        fi
+    done
+    stax-message "  updated vpc assets uploaded"
+    stax-message "  updating stax in aws"
+    #if ! aws cloudformation create-stack \
+    if ! aws cloudformation update-stack \
+        --stack-name "$STAX_NAME" \
+        --template-url "$STAX_TEMPLATE_URL" \
+        --parameters "$(<$STAX_PARAMS)" \
+        --capabilities CAPABILITY_IAM > /dev/null
+    then
+        stax-error "updated failed, sorry about that"
+        stax-error-exit "update failed, exiting" 1
+    fi
+    touch "$STAX_DIR/audit/$STAX_NAME/$(date +'%Y%m%d-%H%M%S')-updated"
+    stax-message "  stax update complete"
+}
+
+stax-create(){
+    stax-message "creating stax"
+    if [[ ! $1 ]]; then
+        stax-error-exit "stax-create takes the template path as an argument" 10
+    fi
+    template_path="$(stax-template-find $1)"
+    if [[ $? != 0 || ! $template_path ]]; then
+        stax-error-exit "could not find template $1" 1
+    fi
+    if [[ -f $STAX_NAME_FILE ]]; then
+        existing_name=$(<$STAX_NAME_FILE)
+        stax-error "existing stax defined: $existing_name"
+        stax-error-exit "currently having only one stack is supported, exiting" 1
+    fi
+    if ! stax-generate; then
+        stax-error-exit "failed to set up stax" 1
+    fi
+    stax-message "$STAX_NAME" "NAME"
+    if ! stax-config; then
+        stax-error-exit "failed to generate stax config" 1
+    fi
+    if [[ ! -f $template_path ]]; then
+        stax-error-exit "template file does not exist: $template_path" 1
+    fi
+    stax-message "  checking for valid json file format"
+    if ! $jq . "$template_path" >/dev/null; then
+        stax-delete-files
+        stax-error-exit "template $template_path failed jq validation, see error above" 1
+    fi
+    if ! stax-create-key; then
+        stax-delete-files
+        stax-error-exit "failed to create key pair" 1
+    fi
+    if ! stax-create-bucket; then
+        stax-delete-key
+        stax-delete-files
+        stax-error-exit "failed to create bucket" 1
+    fi
+    # upload template to s3 to have bigger size limits
+    if ! stax-upload-template "$template_path"; then
+        stax-delete-bucket
+        stax-delete-key
+        stax-delete-files
+        stax-error-exit "failed to upload template to s3" 1
+    fi
+    if ! stax-validate-template; then
+        stax-delete-bucket
+        stax-delete-key
+        stax-delete-files
+        stax-error-exit "failed to validate template" 1
+    fi
+    # save template
+    if ! cp "$template_path" "run/$STAX_NAME.template"; then
+        stax-error "failed to save template $template_path, continuing"
+    fi
+    stax-message "  uploading vpc assets"
+    for f in assets/vpc/*; do
+        if ! aws s3 cp --sse "$f" "s3://$STAX_NAME/" > /dev/null; then
+            stax-error "failed to upload file $f to bucket $STAX_NAME"
+            stax-delete-bucket
+            stax-delete-key
+            stax-delete-files
+            stax-error-exit "asset upload failed" 1
+        fi
+    done
+    stax-message "  vpc assets uploaded"
+    stax-message "  extracting tags from parameter file"
+    tags=
+    for param in Project Group Owner Environment KeepAlive; do
+        new_tag=$(stax-parameter-tag "$param")
+        if [[ $? != 0 ]]; then
+            stax-error "failed to extract tag: $new_tag"
+            stax-error "you must specify the value for parameter $param in the config"
+            stax-delete-bucket
+            stax-delete-key
+            stax-delete-files
+            return 1
+        fi
+        if [[ $tags ]]; then
+            tags="$tags,$new_tag"
+        else
+            tags="[$new_tag"
+        fi
+    done
+    tags="$tags]"
+    stax-message "  using tags: $tags"
+    stax-message "  creating stax in aws"
+    if ! aws cloudformation create-stack \
+        --stack-name "$STAX_NAME" \
+        --template-url "$STAX_TEMPLATE_URL" \
+        --parameters "$(<$STAX_PARAMS)" \
+        --tags "$tags" \
+        --capabilities CAPABILITY_IAM > /dev/null
+    then
+        stax-error "creation failed, cleaning up"
+        stax-delete-bucket
+        stax-delete-key
+        stax-delete-files
+        stax-error-exit "creation failed, exiting" 1
+    fi
+    if ! echo "$STAX_NAME" > "$STAX_NAME_FILE"; then
+        stax-error "failed to create STAX_NAME_FILE: echo $STAX_NAME > $STAX_NAME_FILE"
+        stax-error-exit "stax will not be able to function without it" 1
+    fi
+    # new 'audit' functionality, save names and create date of stax you've created
+    # if useful, we could save this to S3: and make it persist (well sure, uh, or the fax)
+    if mkdir -p "$STAX_DIR/audit/$STAX_NAME"; then
+        touch "$STAX_DIR/audit/$STAX_NAME/$(date +'%Y%m%d-%H%M%S')-created"
+    else
+        stax-error "failed to create audit directory: $STAX_DIR/audit/$STAX_NAME"
+        stax-error "please create the audit directory yourself"
+    fi
+    stax-message "  stax creation complete"
+}
+
+stax-ssh-config(){
+    stax-message "creating ssh_config"
+    STAX_SSH_CONFIG="$STAX_DIR/$STAX_NAME.ssh_config"
+    gwhosts="$STAX_DIR/$STAX_NAME.gateway_hosts"
+    shosts="$STAX_DIR/$STAX_NAME.service_hosts"
+    for host_file in $gwhosts $shosts; do
+        if [[ ! -f $host_file ]]; then
+            stax-error "missing host file: $host_file"
+            return 10
+        fi
+    done
+    stax-message "  writing $STAX_SSH_CONFIG"
+    cat > "$STAX_SSH_CONFIG" <<EOF
+ForwardAgent yes
+ForwardX11 no
+UserKnownHostsFile /dev/null
+StrictHostKeyChecking no
+ServerAliveInterval 60
+ServerAliveCountMax 30
+TCPKeepAlive no
+IdentityFile $STAX_PRIV_KEY
+
+Host bastion
+  User ec2-user
+  HostName $STAX_PUB_IP
+EOF
+    if [[ $STAX_JUMP ]]; then
+        # when jumping through their jump box, use their ssh_config
+        cat >> "$STAX_SSH_CONFIG" <<EOF
+  ProxyCommand ssh -q -A -x -o ServerAliveInterval=60 -o ServerAliveCountMax=30 -o TCPKeepAlive=no -W %h:%p $STAX_JUMP
+EOF
+    fi
+
+    gi=
+    for gip in $(<"$gwhosts"); do
+        cat >> "$STAX_SSH_CONFIG" <<EOF
+
+Host gateway$gi
+  User core
+  HostName $gip
+  ProxyCommand ssh -q -F $STAX_SSH_CONFIG -W %h:%p bastion
+EOF
+        gi=$((gi+1))
+    done
+    si=
+    for sip in $(<"$shosts"); do
+        cat >> "$STAX_SSH_CONFIG" <<EOF
+
+Host service$si
+  User core
+  HostName $sip
+  ProxyCommand ssh -q -F $STAX_SSH_CONFIG -W %h:%p bastion
+EOF
+        si=$((si+1))
+    done
+    stax-message "  created $STAX_SSH_CONFIG"
+    SSH_OPTIONS="$SSH_OPTIONS -F $STAX_SSH_CONFIG"
+}
+
+# ensure there is a stax
+stax-existing(){
+    if [[ ! -f $STAX_NAME_FILE ]]; then
+        stax-error "no stax defined, use create first"
+        return 1
+    fi
+    # define all the global variables
+    STAX_NAME=$(<"$STAX_NAME_FILE")
+    STAX_DESC="$STAX_DIR/$STAX_NAME.json"
+    STAX_PARAMS="$STAX_DIR/$STAX_NAME.params"
+    STAX_KEY="$STAX_NAME"
+    STAX_PRIV_KEY="$STAX_DIR/$STAX_NAME.pem"
+    STAX_PUB_KEY="$STAX_PRIV_KEY.pub"
+    STAX_BASTION_FILE="$STAX_DIR/$STAX_NAME.bastion"
+    STAX_JUMP_FILE="$STAX_DIR/$STAX_NAME.jump"
+    if [[ -f $STAX_JUMP_FILE ]]; then
+        STAX_JUMP=$(<"$STAX_JUMP_FILE")
+    elif [[ $STAX_JUMP ]]; then
+        echo "$STAX_JUMP" > "$STAX_JUMP_FILE"
+    fi
+    STAX_SSH_CONFIG="$STAX_DIR/$STAX_NAME.ssh_config"
+    SSH_OPTIONS="$SSH_OPTIONS -F $STAX_SSH_CONFIG"
+}
+
+# save the description of the stax to a file
+stax-describe(){
+    stax-message "describe stax"
+    if [[ ! $STAX_NAME ]]; then
+        stax-error "cannot call stax-describe with STAX_NAME undefined"
+        return 10
+    fi
+    stax-message "$STAX_NAME" "NAME"
+    stax-message "  querying aws"
+    STAX_DESC="$STAX_DIR/$STAX_NAME.json"
+    if ! aws --output json cloudformation describe-stacks --stack-name "$STAX_NAME" > "$STAX_DESC"; then
+        stax-error-message "failed to get stax information for $STAX_NAME from aws"
+        return 1
+    fi
+    stax-message "  query complete"
+    stax-message "  see $STAX_DESC for details"
+}
+
+stax-autoservices(){
+    if [[ ! $1 ]]; then
+        stax-error "template path must be provided when calling stax-autoservices()"
+        return 10
+    fi
+    template_path="$1"
+    services_file="$(echo $template_path|cut -d"." -f1).services"
+    if [[ $services_file == .services ]]; then
+        stax-error "unable to create name of services file from template path: $template_path"
+        return 1
+    fi
+    if [[ ! -f $services_file ]]; then
+        stax-message "services file $services_file does not exist, no services to launch"
+        return 0
+    fi
+    stax-message "  using services file: $services_file"
+    if ! stax-complete 1; then
+        return 1
+    fi
+    if [ ! -f "$STAX_BASTION_FILE" ]; then
+        stax-bastionip
+        if ! stax-getdockerips; then
+            exit 1
+        fi
+        if ! stax-ssh-config; then
+            exit 1
+        fi
+    fi
+    STAX_PUB_IP=$(<$STAX_BASTION_FILE)
+    stax-message "  checking fleet"
+    GatewayClusterSize=`cat $STAX_PARAMS|grep GatewayClusterSize|cut -d"\"" -f 8`
+    machine_num=$((GatewayClusterSize+1))
+    elapsed_time="0"
+    sleep_int="10"
+    while :; do
+        status=`stax-fleetstats | grep "location=" | wc -l`
+        if [[ $status == $machine_num ]]; then
+            stax-message "  fleet clustering complete"
+            break
+        fi
+        stax-message "  fleet cluster not completed ($status / $machine_num completed)"
+        stax-message "    sleeping $sleep_int seconds (elapsed: $elapsed_time seconds) " "zzzz"
+        sleep $sleep_int
+        elapsed_time=$(($elapsed_time+$sleep_int))
+    done
+    stax-message "fleet is available on the cluster, ready to install services" "!!!!"
+    stax-message "starting all services in $services_file"
+    services=$(<$services_file)
+    for service in $services; do
+        stax-message "  installing $service" "----"
+        service_file="assets/services/$service.service"
+        if [[ ! -f $service_file ]]; then
+            stax-error "  service file $service_file not found"
+            return 1
+        fi
+        service_basename=${service_file##*/}
+        stax-message "    copying $service_file to service docker host" "++++"
+        scp_cmd="scp $SSH_OPTIONS $service_file service:$service_basename"
+        if ! $scp_cmd; then
+            stax-error "failed to copy service file to service docker host: $scp_cmd"
+            return 1
+        fi
+        stax-message "    submitting service $service to fleet" "++++"
+        submit_cmd="ssh $SSH_OPTIONS service fleetctl submit $service_basename"
+        if ! $submit_cmd; then
+            stax-error "failed to submit service to docker host: $submit_cmd"
+            return 1
+        fi
+        stax-message "    starting service $service in fleet" "++++"
+        start_cmd="ssh $SSH_OPTIONS service fleetctl start $service_basename"
+        if ! $start_cmd; then
+            stax-error "failed to start service on docker host: $start_cmd"
+            return 1
+        fi
+        stax-message "    $service running on Docker service cluster" "++++"
+        touch "$STAX_DIR/audit/$STAX_NAME/$(date +'%Y%m%d-%H%M%S')-fleetctl-started-service-$service"
+    done
+}
+
+# ensure stax creation is complete
+stax-complete(){
+    wait="$1"
+    stax-message "checking if stax build is complete"
+    elapsed_time="0"
+    sleep_int="30"
+    while :; do
+        if ! stax-describe; then
+            stax-error "unable to get information about stax $STAX_NAME"
+            return 1
+        fi
+        status=$($jq --raw-output '.Stacks[].StackStatus' "$STAX_DESC")
+        if [[ $status == CREATE_COMPLETE ]]; then
+            break
+        elif [[ $status == UPDATE_COMPLETE ]]; then
+            break
+        elif [[ $status == UPDATE_IN_PROGRESS ]]; then
+            stax-error "it appears the build is still updating: $status"
+            return 1
+        elif [[ $status != CREATE_IN_PROGRESS ]]; then
+            stax-error "it appears the build failed: $status"
+            return 1
+        fi
+        stax-message "  stax build not complete: $status"
+        if [[ $wait ]]; then
+            stax-message "  waiting for build to complete, sleeping $sleep_int seconds (elapsed $elapsed_time)" "zzzz"
+        else
+            return 1
+        fi
+        sleep $sleep_int
+        elapsed_time=$(($elapsed_time+$sleep_int))
+    done
+    stax-message "  stack $STAX_NAME build complete"
+}
+
+stax-running-instances(){
+    aws --output json ec2 describe-instances --filter Name="instance-state-code",Values="16" | grep "\"Instances\"\:" | wc -l | sed 's/ //g'
+}
+
+stax-list(){
+    stax-message "list currently running stax"
+    stax-message "  querying aws for currently running stax"
+    running_stax=$(aws --output json cloudformation list-stacks --stack-status-filter CREATE_COMPLETE UPDATE_COMPLETE | $jq --raw-output '.StackSummaries[].StackName' | grep "^$prefix-$pkg-")
+    if [[ $? != 0 || ! $running_stax ]]; then
+        #stax-error "  aws query failed"
+        stax-error "  aws query failed or produced a blank set"
+        stax-error "    - this could be indicitive of an error"
+        stax-error "         unless this is a brand new instance, if so, ignore this error"
+        #FIX ME - if query works but there are no instances, users gets error and we stop - account for that and keep going
+        #return 1
+    fi
+    n_running_stax=$(echo "$running_stax" | wc -l)
+    stax-message "  $n_running_stax running stax"
+    stax-message "    (the * denotes one handled by local node)"
+    my_stax=$(ls -1 "$STAX_DIR/audit") 
+    # put a * by one if it was launched from here
+    for stack in $running_stax; do
+        echo -n "$stack"
+        for mine in $my_stax; do
+            if [[ $stack == $mine ]]; then
+                echo -n " *"
+            fi
+        done
+        echo ""
+    done
+    stax-message "list currently running ec2 instances"
+    stax-message "  querying aws "
+    n_running_ec2=$(stax-running-instances)
+    stax-message "  $n_running_ec2 running ec2 instances"
+}
+
+stax-services(){
+    stax-message "services that stax can run on the cluster"
+    echo "{"
+    ls -1 assets/services/*.service | cut -d"/" -f3 | cut -d"." -f1
+    echo "}"
+}
+
+stax-start-service(){
+    if [ -z "$1" ]; then
+        stax-error "you must provide a service name, exiting"
+        return 10
+    fi
+    stax-message "starting timer for $service on the stax service cluster" "++++"
+    service="$1"
+    service_file="assets/services/$service.service"
+    timer_file="assets/services/$service.timer"
+    service_basename=${service_file##*/}
+    timer_basename=${timer_file##*/}
+    if [[ ! -f $service_file ]]; then
+        stax-error "unknown service: $service"
+        return 1
+    fi
+
+    if [[ -f $timer_file ]]; then
+        stax-message "starting timer for $service on the stax service cluster" "++++"
+
+        stax-message "  copying $service_file to service docker host" "++++"
+        scp_cmd="scp $SSH_OPTIONS $service_file service:$service_basename"
+        if ! $scp_cmd; then
+            stax-error "failed to copy service file to service docker host: $scp_cmd"
+            return 1
+        fi
+
+        stax-message "  copying $timer_file to service docker host" "++++"
+        scp_cmd="scp $SSH_OPTIONS $timer_file service:$timer_basename"
+        if ! $scp_cmd; then
+            stax-error "failed to copy timer file to service docker host: $scp_cmd"
+            return 1
+        fi
+
+        #fleetctl load dj.timer
+        stax-message "  loading timer $service to fleet" "++++"
+        submit_cmd="ssh $SSH_OPTIONS service fleetctl load $timer_basename"
+        if ! $submit_cmd; then
+            stax-error "failed to submit timer to docker host: $submit_cmd"
+            return 1
+        fi
+
+        #fleetctl load dj.service
+        stax-message "  loading service $service to fleet" "++++"
+        submit_cmd="ssh $SSH_OPTIONS service fleetctl load $service_basename"
+        if ! $submit_cmd; then
+            stax-error "failed to submit service to docker host: $submit_cmd"
+            return 1
+        fi
+
+        # fleetctl start dj.timer
+        stax-message "  starting timer $service in fleet" "++++"
+        start_cmd="ssh $SSH_OPTIONS service fleetctl start $timer_basename"
+        if ! $start_cmd; then
+            stax-error "failed to start timer on docker host: $start_cmd"
+            return 1
+        fi
+        stax-message "  timer $service running on Docker service cluster - it will control $service_basename" "++++"
+    else
+        stax-message "  copying $service_file to service docker host" "++++"
+        scp_cmd="scp $SSH_OPTIONS $service_file service:$service_basename"
+        if ! $scp_cmd; then
+            stax-error "failed to copy service file to service docker host: $scp_cmd"
+            return 1
+        fi
+
+        stax-message "  submitting service $service to fleet" "++++"
+        submit_cmd="ssh $SSH_OPTIONS service fleetctl submit $service_basename"
+        if ! $submit_cmd; then
+            stax-error "failed to submit service to docker host: $submit_cmd"
+            return 1
+        fi
+
+        stax-message "  starting service $service in fleet" "++++"
+        start_cmd="ssh $SSH_OPTIONS service fleetctl start $service_basename"
+        if ! $start_cmd; then
+            stax-error "failed to start service on docker host: $start_cmd"
+            return 1
+        fi
+        stax-message "  $service running on Docker service cluster" "++++"
+    fi
+    touch "$STAX_DIR/audit/$STAX_NAME/$(date +'%Y%m%d-%H%M%S')-fleetctl-started-service-$service"
+}
+
+stax-fleetstats(){
+    stax-message "status from fleetctl on the service cluster"
+    for fleet_cmd in "list-machines" "list-units" "list-unit-files"; do
+        stax-message "  running $fleet_cmd"
+        if ! stax-connect service fleetctl $fleet_cmd; then
+            stax-error "command failed on service host: fleetctl $fleet_cmd"
+            return 1
+        fi
+    done
+}
+
+stax-history(){
+    stax-message "history"
+    stax-message "  recently created and deleted stax"
+    for stack in $(ls -dtr run/audit/*); do
+        echo "${stack##*/}:"
+        ls -1tr "$stack" | sed 's/^/  /'
+    done
+}
+
+stax-sleep(){
+    stax-existing
+    stax-describe
+    if [ ! -f "$STAX_BASTION_FILE" ]; then
+        stax-bastionip
+    fi
+    stax-message "  checking bastion status in aws"
+    BASTION_IP=$($jq --raw-output '.Stacks[].Outputs[] | select(.OutputKey=="BastionEIP").OutputValue' "$STAX_DESC")
+    if [[ ! $BASTION_IP ]]; then
+        stax-error "unable to determine public IP address of bastion host"
+        return 1
+    fi
+    stax-message "    instance IP = $BASTION_IP"
+
+    BASTION_ID=`aws ec2 describe-addresses | $jq --raw-output '.Addresses[] | select(.PublicIp=="'$BASTION_IP'").InstanceId'`
+    if [[ ! $BASTION_ID ]]; then
+        stax-error "unable to determine instance ID of bastion host"
+        return 1
+    fi
+    stax-message "    instance ID = $BASTION_ID"
+
+    BASTION_STATUS=`aws ec2 describe-instances --instance-id $BASTION_ID | $jq --raw-output '.Reservations[].Instances[].State.Name'`
+    if [[ ! $BASTION_STATUS ]]; then
+        stax-error "unable to determine status of bastion host"
+        return 1
+    fi
+    stax-message "  bastion status: $BASTION_STATUS"
+
+    stax-message "Will toggle ssh access to $STAX_NAME bastion host" "++++"
+    if [[ $BASTION_STATUS == running ]]; then
+        ec2_cmd="stop-instances"
+        stax-message "  stopping bastion host"
+    elif [[ $BASTION_STATUS == stopped ]]; then
+        ec2_cmd="start-instances"
+        stax-message "  starting bastion host"
+    else
+        stax-error "unsupported instance state: $BASTION_STATUS"
+        return 1
+    fi
+    if ! aws ec2 $ec2_cmd --instance-id $BASTION_ID > /dev/null; then
+        stax-error "bastion toggle failed, exiting"
+        return 1
+    fi
+    stax-message "  waiting 15 seconds for state change" "zzzz"
+    sleep 15
+    BASTION_STATUS=`aws ec2 describe-instances --instance-id $BASTION_ID|$jq --raw-output '.Reservations[].Instances[].State.Name'`
+    stax-message "  bastion status: $BASTION_STATUS"
+}
+
+stax-bastionip(){
+    stax-message "getting public IP (EIP)"
+    if [[ ! $STAX_DESC ]]; then
+        stax-error "cannot call stax-bastionip without STAX_DESC defined"
+        return 10
+    fi
+    if [[ ! -f $STAX_DESC ]]; then
+        stax-error "stax description file not found: $STAX_DESC"
+        return 1
+    fi
+    STAX_BASTION_FILE="$STAX_DIR/$STAX_NAME.bastion"
+    STAX_PUB_IP=$($jq --raw-output '.Stacks[].Outputs[] | select(.OutputKey=="BastionEIP").OutputValue' "$STAX_DESC")
+    stax-message "  public IP (EIP): $STAX_PUB_IP"
+    stax-message "  writing to $STAX_BASTION_FILE"
+    echo "$STAX_PUB_IP" > "$STAX_BASTION_FILE"
+}
+
+stax-getdockerips(){
+    stax-message "get gateway and service IPs"
+    stax-message "  querying aws for gateway hosts"
+    gateway_hosts="$STAX_DIR/$STAX_NAME.gateway_hosts"
+    if ! aws --output json ec2 describe-instances | $jq --raw-output ".Reservations[].Instances[] | select(.Tags[].Value==\"gateway-$STAX_NAME\").PrivateIpAddress" > "$gateway_hosts" 2>/dev/null; then
+        stax-error "failed to query aws for gateway instances"
+        return 1
+    fi
+    service_hosts="$STAX_DIR/$STAX_NAME.service_hosts"
+    > "$service_hosts" # truncate file
+    stax-message "  getting service leaders"
+    for i in 1 2 3; do
+        if ! $jq --raw-output ".Stacks[].Outputs[] | select(.OutputKey==\"ServiceLeader${i}IP\").OutputValue" "$STAX_DIR/$STAX_NAME.json" >> "$service_hosts" 2>/dev/null; then
+            stax-error "failed to get IP for leader $i from $STAX_DIR/$STAX_NAME.json"
+        fi
+    done
+    stax-message "  querying aws for service hosts"
+    if ! aws --output json ec2 describe-instances | $jq --raw-output ".Reservations[].Instances[] | select(.Tags[].Value==\"service-$STAX_NAME\").PrivateIpAddress" >> "$service_hosts" 2>/dev/null; then
+        stax-error "failed to query aws for service instances"
+        return 1
+    fi
+}
+
+stax-connect(){
+    target="bastion"
+    if [[ $1 ]]; then
+        target="$1"
+        shift
+        case "$target" in
+            bastion|gateway*|service*)
+                :;;
+            *)
+                stax-error "unknown connection target: $target"
+                return 1
+                ;;
+        esac
+    fi
+    # only print message when no command supplied
+    if [[ $# == 0 ]]; then
+        stax-message "connecting to stax: $target"
+    fi
+    ssh_cmd="ssh $SSH_OPTIONS $target $@"
+    if ! $ssh_cmd; then
+        stax-error "ssh command failed: $ssh_cmd"
+        return 1
+    fi
+}
+
+stax-delete-key(){
+    stax-message "deleting key pair"
+    stax-message "  making sure key $STAX_NAME exists in aws"
+    if ! aws ec2 describe-key-pairs --key-names "$STAX_NAME" > /dev/null 2>&1; then
+        stax-message "  key $STAX_NAME does not exist in aws"
+        return 0
+    fi
+    stax-message "  deleting $STAX_NAME key from aws"
+    status=0
+    if ! aws ec2 delete-key-pair --key-name "$STAX_NAME" > /dev/null; then
+        stax-error "failed to delete key $STAX_NAME, please remove it manually"
+        return 1
+    fi
+    rm -f $STAX_PUB_KEY $STAX_PRIV_KEY
+}
+
+stax-delete-files(){
+    stax-message "deleting local files"
+    if [[ ! $STAX_NAME ]]; then
+        stax-error "cannot delete files if STAX_NAME is not defined"
+        return 10
+    fi
+    stax-message "  deleting $STAX_NAME files"
+    rm -f "$STAX_DIR/$STAX_NAME"* "$STAX_NAME_FILE" > /dev/null
+}
+
+stax-delete-bucket(){
+    stax-message "removing s3 bucket"
+    if [[ ! $STAX_NAME ]]; then
+        stax-error "cannot delete bucket if STAX_NAME is not defined"
+        return 10
+    fi
+    stax-message "  making sure bucket $STAX_NAME exists in aws"
+    if ! aws --output json s3api list-buckets | $jq --raw-output '.Buckets[].Name' | grep -q "^$STAX_NAME$" > /dev/null 2>&1; then
+        stax-error "bucket $STAX_NAME does not exist"
+        return 1
+    fi
+    stax-message "  removing s3 bucket $STAX_NAME"
+    if ! aws s3 rb --force "s3://$STAX_NAME" > /dev/null; then
+        stax-error "failed to delete 3 bucket $STAX_NAME, please remove it manually"
+    fi
+}
+
+stax-delete(){
+    stax-message "delete stax"
+    if [[ $yes != y ]]; then
+        read -p "${yellow}[ ${cyan}????${yellow} ]${reset}     ok to delete $STAX_NAME [y/n]? " answer
+        if [[ $answer != y ]] ; then
+            stax-message "  will not delete $STAX_NAME"
+            return 0
+        fi
+    fi
+    stop=
+    # remove any databases
+    if [[ -f $STAX_DIR/$STAX_NAME.rds ]]; then
+        for rds in $($tac "$STAX_DIR/$STAX_NAME.rds"); do
+            if [[ $yes != y ]]; then
+                read -p "${yellow}[ ${cyan}????${yellow} ]${reset}     ok to delete $rds [y/n]? " answer
+                if [[ $answer != y ]] ; then
+                    stax-message "  will not delete $addition"
+                    stop=1
+                    continue
+                fi
+            fi
+            if ! stax-rds-delete "$rds"; then
+                stax-error "failed to remove rds: $rds"
+                stax-error "continuing but deleting stax will likely fail"
+            fi
+        done
+    fi
+    # remove any additions
+    if [[ -f $STAX_DIR/$STAX_NAME.add ]]; then
+        for addition in $($tac "$STAX_DIR/$STAX_NAME.add"); do
+            if [[ $yes != y ]]; then
+                read -p "${yellow}[ ${cyan}????${yellow} ]${reset}     ok to delete $addition [y/n]? " answer
+                if [[ $answer != y ]] ; then
+                    stax-message "  will not delete $addition"
+                    stop=1
+                    continue
+                fi
+            fi
+            if ! stax-remove "$addition"; then
+                stax-error "failed to remove addition: $addition"
+                stax-error "continuing but deleting stax will likely fail"
+            fi
+        done
+    fi
+    if [[ $stop ]]; then
+        stax-error "you chose not to remove some additions, so we will not attempt to delete the stack"
+        return 1
+    fi
+    if [[ -d $STAX_DIR/audit/$STAX_NAME-logger ]]; then
+        touch "$STAX_DIR/audit/$STAX_NAME-logger/$date-deleted-logger"
+    fi
+    stax-message "deleting $STAX_NAME stax"
+    if ! aws cloudformation delete-stack --stack-name "$STAX_NAME" > /dev/null; then
+        stax-error "stax delete of $STAX_NAME failed"
+        stax-error "you will need to clean up the stack, key, bucket, and files"
+        return 1
+    fi
+    stax-message "  delete started successfully"
+    touch "$STAX_DIR/audit/$STAX_NAME/$(date +'%Y%m%d-%H%M%S')-delete"
+    status=0
+    if ! stax-delete-bucket; then
+        status=2
+    fi
+    if ! stax-delete-key; then
+        status=2
+    fi
+    if ! stax-delete-files; then
+        status=2
+    fi
+    return $status
+}
+
+stax-generate-random(){
+    random_num=$((RANDOM%100000+10000))
+    if [[ ! $random_num || $random_num < 10000 ]]; then
+        stax-error "failed to generate random number"
+        return 1
+    fi
+    stax_words="assets/stax/words"
+    if [[ ! -f $stax_words ]]; then
+        stax-error "stax words file is missing: $stax_words"
+        return 1
+    fi
+    numw=$(wc -l < "$stax_words" | tr -d ' ')
+    if [[ ! $numw || $numw < 1 ]]; then
+        stax-error "failed to get number of words in words file: $stax_words"
+        return 1
+    fi
+    random_name=$(head -n $(($RANDOM % $numw + 1)) $stax_words | tail -n 1)
+    if [[ ! $random_name ]]; then
+        stax-error "failed to generate random name"
+        return 1
+    fi
+    echo "$random_num-$random_name"
+}
+
+# bootstrap: set up STAX_NAME
+prefix="vpc"
+stax-generate(){
+    if [[ $1 ]]; then
+        prefix="$1"
+    fi
+    postfix=$(stax-generate-random)
+    if [[ $? != 0 ]]; then
+        stax-error "failed to generate random part of name: $postfix"
+        return 1
+    fi
+    STAX_NAME="$prefix-$pkg-$postfix"
+}
+
+# FIXME: combine the config functions into one
+# generate parameters file
+stax-config(){
+    stax-message "creating parameter file"
+    # verify config is filled out
+    if [[ ! -f $config ]]; then
+        stax-error "config file does not exist: $config"
+        stax-error "configuration required"
+        stax-error "copy example to config directory, configure it and run again."
+        stax-error "    $ cp $config.example $config"
+        return 1
+    fi
+    # make sure they did not just copy the file and not edit
+    if grep -q '<changeMe>' "$config" > /dev/null 2>&1; then
+        stax-error "you did not provide valid values for some parameters in the config: $config"
+        default_params="$($jq --raw-output '.[] | select(.ParameterValue=="<changeMe>").ParameterKey' $config | xargs)"
+        stax-error "parameters with invalid defaults: $default_params"
+        return 1
+    fi
+    # initialize sed command
+    sed="sed -e s/@KEY_NAME@/$STAX_NAME/"
+    # check what subsitutions need to be done
+    if grep -q '@OWNER@' "$config" > /dev/null 2>&1; then
+        owner="$(id -u -n)"
+        if [[ -z $owner ]]; then
+            stax-error "failed to determine user"
+            return 1
+        fi
+        sed="$sed -e s/@OWNER@/$owner/"
+    fi
+    external_cidr="$(curl -s http://icanhazip.com)/32"
+    if [[ -z $external_cidr ]]; then
+        stax-error "failed to get external IP address for local machine"
+    fi
+    if grep -q '@HTTP_FROM@' "$config" > /dev/null 2>&1; then
+        if [[ ! $external_cidr ]]; then
+            stax-error "config requests replacement for @HTTP_FROM@ but unable to determine external IP"
+            return 1
+        fi
+        sed="$sed -e s|@HTTP_FROM@|$external_cidr|"
+    fi
+    if grep -q '@SSH_FROM@' "$config" > /dev/null 2>&1; then
+        if [[ $STAX_JUMP ]]; then
+            ssh_from="$STAX_JUMP/32"
+        else
+            if [[ ! $external_cidr ]]; then
+                stax-error "config requests replacement for @SSH_FROM@ but unable to determine external IP"
+                return 1
+            fi
+            ssh_from="$external_cidr"
+        fi
+        sed="$sed -e s|@SSH_FROM@|$ssh_from|"
+    fi
+    STAX_PARAMS="$STAX_DIR/$STAX_NAME.params"
+    if ! $sed "$config" > "$STAX_PARAMS"; then
+        stax-error "sed failed to replace elements in $config: $sed"
+        return 1
+    fi
+}
+
+# generate add parameters file
+stax-add-config(){
+    stax-message "creating parameter file for add"
+    if [[ ! $1 ]]; then
+        stax-error "you must supply the config file path when calling stax-add-config"
+        return 10
+    fi
+    config="$1"
+    # verify config is filled out
+    if [[ ! -f $config ]]; then
+        stax-error "config file does not exist: $config"
+        stax-error "configuration required"
+        stax-error "copy example to config directory, configure it and run again."
+        stax-error "    $ cp rds.json.example rds.json"
+        return 1
+    fi
+    if ! grep -q '@VPC_ID@' "$config" > /dev/null 2>&1; then
+        stax-error "the replacement string @VPC_ID@ does not appear in the config: $config"
+        stax-error "refusing to continue since this does not appear to be adding to an existing vpc"
+        return 1
+    fi
+    vpc_id=$($jq --raw-output '.Stacks[].Outputs[] | select(.OutputKey=="VPCID").OutputValue' "$STAX_DIR/$STAX_NAME.json")
+    if [[ ! $vpc_id ]]; then
+        stax-error "failed to determine vpc id"
+        return 1
+    fi
+    sed="sed -e s/@VPC_ID@/$vpc_id/"
+    if grep -q '@SERVICE_SG_ID@' "$config" > /dev/null 2>&1; then
+        service_sg_id=$($jq --raw-output '.Stacks[].Outputs[] | select(.OutputKey=="ServiceCoreOSSecurityGroup").OutputValue' "$STAX_DIR/$STAX_NAME.json")
+        if [[ ! $service_sg_id ]]; then
+            stax-error "failed to determine service security group id"
+            return 1
+        fi
+        sed="$sed -e s/@SERVICE_SG_ID@/$service_sg_id/"
+    fi
+    if grep -q '@OWNER@' "$config" > /dev/null 2>&1; then
+        owner="$(id -u -n)"
+        if [[ -z $owner ]]; then
+            stax-error "failed to determine user"
+            return 1
+        fi
+        sed="$sed -e s/@OWNER@/$owner/"
+    fi
+    STAX_ADD_PARAMS="$STAX_DIR/$STAX_NAME_ADD.params"
+    stax-message "  building params file: $STAX_ADD_PARAMS"
+    if ! $sed "$config" > "$STAX_ADD_PARAMS"; then
+        stax-error "sed failed to replace elements in $config: $sed $config > $STAX_ADD_PARAMS"
+        return 1
+    fi
+}
+
+# stax-rds PASSWORD [NAME USER ENGINE SIZE INSTANCE_CLASS STORAGE_TYPE]
+stax-rds(){
+    stax-message "creating rds instance"
+    if [[ $# < 1 ]]; then
+        stax-error "you must provide a password when calling stax-rds"
+        return 10
+    fi
+    password="$1"
+    name="test"
+    user="tester"
+    engine="postgres"
+    size="5"
+    instance_class="db.m3.medium"
+    storage_type="gp2"
+    if [[ $2 ]]; then name="$2"; fi
+    if [[ $3 ]]; then user="$3"; fi
+    if [[ $4 ]]; then engine="$4"; fi
+    if [[ $5 ]]; then size="$5"; fi
+    if [[ $6 ]]; then instance_class="$6"; fi
+    if [[ $7 ]]; then storage_type="$7"; fi
+    rds_name=$(stax-generate-random)
+    if [[ $? != 0 ]]; then
+        stax-error "failed to generate name for add"
+        return 1
+    fi
+    STAX_NAME_RDS="$STAX_NAME-rds-$rds_name"
+    stax-message "$STAX_NAME_RDS" "NAME"
+    db_subnet_group=$($jq --raw-output '.Stacks[].Outputs[] | select(.OutputKey=="DBSubnetGroup").OutputValue' "$STAX_DIR/$STAX_NAME.json")
+    if [[ $? != 0 || ! $db_subnet_group ]]; then
+        stax-error "failed to determine db subnet group"
+        return 1
+    fi
+    stax-message "  using db subnet $db_subnet_group"
+    vpc_sg_id=$($jq --raw-output '.Stacks[].Outputs[] | select(.OutputKey=="DBVPCSecurityGroup").OutputValue' "$STAX_DIR/$STAX_NAME.json")
+    if [[ $? != 0 || ! $vpc_sg_id ]]; then
+        stax-error "failed to determine vpc security group id"
+        return 1
+    fi
+    stax-message "  using vpc security group $vpc_sg_id"
+    owner="$(id -u -n)"
+    if [[ $? != 0 || ! $owner ]]; then
+        stax-error "failed to determine user"
+        return 1
+    fi
+    stax-message "  extracting tags from parameter file"
+    tags="[{\"Key\":\"stax:name\",\"Value\":\"$STAX_NAME\"},{\"Key\":\"$tag_prefix:owner\",\"Value\":\"$owner\"}"
+    for param in Project Group Environment KeepAlive; do
+        new_tag=$(stax-parameter-tag "$param")
+        if [[ $? != 0 ]]; then
+            stax-error "failed to extract tag: $new_tag"
+            stax-error "you must specify the value for parameter $param in the config"
+            return 1
+        fi
+        tags="$tags,$new_tag"
+    done
+    tags="$tags]"
+    stax-message "  using tags: $tags"
+    stax-message "  creating rds instance $STAX_NAME_RDS"
+    if ! aws rds create-db-instance \
+         --db-name "$name" \
+         --db-instance-identifier "$STAX_NAME_RDS" \
+         --allocated-storage "$size" \
+         --db-instance-class "$instance_class" \
+         --engine "$engine" \
+         --master-username "$user" \
+         --master-user-password "$password" \
+         --vpc-security-group-ids "$vpc_sg_id" \
+         --db-subnet-group-name "$db_subnet_group" \
+         --backup-retention-period "7" \
+         --multi-az \
+         --no-publicly-accessible \
+         --storage-type "$storage_type" \
+         --storage-encrypted \
+         --tags "$tags" > /dev/null
+    then
+        stax-error "failed to create rds instance"
+        return 1
+    fi
+    date=$(date +'%Y%m%d-%H%M%S')
+    touch "$STAX_DIR/audit/$STAX_NAME/$date-rds-$STAX_NAME_RDS"
+    if ! echo "$STAX_NAME_RDS" >> "$STAX_DIR/$STAX_NAME.rds"; then
+        stax-error "failed to add $STAX_NAME_RDS to RDS file: $STAX_DIR/$STAX_NAME.rds"
+        stax-error "this will create problems when trying to delete this stack"
+        return 2
+    fi
+    stax-message "  rds creation complete"
+}
+
+stax-rds-delete(){
+    stax-message "removing rds"
+    if [[ ! $1 ]]; then
+        stax-error "stax-remove: you must supply the name of the rds to remove"
+        return 10
+    fi
+    rds="$1"
+    stax-message "  removing $rds"
+    if ! grep -q "^$rds\$" "$STAX_DIR/$STAX_NAME.rds" > /dev/null 2>&1; then
+        stax-error "unknown rds: $rds"
+        return 1
+    fi
+    if ! aws rds delete-db-instance \
+         --db-instance-identi "$rds" \
+         --no-skip-final-snapshot \
+         --final-db-snapshot-identifier "$rds-final" > /dev/null
+    then
+        stax-error "failed to remove rds: $rds"
+        return 1
+    fi
+    if ! sed -i.bak "/^$rds\$/d" "$STAX_DIR/$STAX_NAME.rds"; then
+        stax-error "failed to remove $rds from $STAX_DIR/$STAX_NAME.rds"
+        stax-error "this may cause problems when deleting the stack"
+        return 2
+    fi
+    rm -f "$STAX_DIR/$STAX_NAME.rds.bak"
+    stax-message "  removal complete"
+    date=$(date +'%Y%m%d-%H%M%S')
+    touch "$STAX_DIR/audit/$STAX_NAME/$date-removed-$rds"
+}
+
+stax-slack(){
+    if [ ! -z "$STAX_SLACK_WHOOK" ]; then 
+        stax-message "posting results to slack/#stax" 
+        report=
+        if [[ $1 ]]; then
+            status="$1"
+        fi
+        slack_curl="curl --silent -X POST --data-urlencode"
+        user=$(id -u -n)
+        slack_payload_prefix="payload={\"channel\":\"#stax\",\"username\":\"staxbot\",\"icon_emoji\":\":ghost:\",\"text\":\"$user@$host:"
+        if [[ $status ]]; then
+            slack_payload="$slack_payload_prefix $status $STAX_NAME\"}"
+            $slack_curl "$slack_payload" $STAX_SLACK_WHOOK > /dev/null
+        fi
+        slack_instances=$(stax-running-instances)
+        slack_payload="$slack_payload_prefix currently $slack_instances running ec2 instances\"}"
+        $slack_curl "$slack_payload" $STAX_SLACK_WHOOK > /dev/null
+    else
+        return 1
+    fi
+}
+
+# automated test
+stax-test-create(){
+    stax-message "building test stax"
+    if [[ ! $1 ]]; then
+        stax-error-exit "stax-test takes the template path as an argument" 10
+    fi
+    template_path="$1"
+    stax-message "  create dummy parameter config"
+    user=$(id -u -n)
+    config="$STAX_DIR/test-config-$user-$$-$RANDOM.json"
+    if ! cat > "$config" <<EOF
+[
+  { "ParameterKey": "Project",            "ParameterValue": "Stax Auto Test" },
+  { "ParameterKey": "Product",            "ParameterValue": "Stax User Auto Test" },
+  { "ParameterKey": "Group",              "ParameterValue": "TestGroup" },
+  { "ParameterKey": "Team",               "ParameterValue": "TestTeam" },
+  { "ParameterKey": "Environment",        "ParameterValue": "test" },
+  { "ParameterKey": "KeepAlive",          "ParameterValue": "false" },
+  { "ParameterKey": "DockerInstanceType", "ParameterValue": "t2.micro" },
+  { "ParameterKey": "Owner",              "ParameterValue": "@OWNER@" },
+  { "ParameterKey": "KeyName",            "ParameterValue": "@KEY_NAME@" },
+  { "ParameterKey": "AllowSSHFrom",       "ParameterValue": "@SSH_FROM@" },
+  { "ParameterKey": "AllowHTTPFrom",      "ParameterValue": "@HTTP_FROM@" }
+]
+EOF
+    then
+        stax-error "failed to create test config file"
+        return 1
+    fi
+    # loop through the setup commands
+    for cmd in \
+        "stax-create $template_path" \
+        "stax-existing" \
+        "stax-complete 1" \
+        "stax-bastionip" \
+        "stax-getdockerips" \
+        "stax-ssh-config"
+    do
+        if ! $cmd; then
+            rm -f "$config"
+            stax-error "stax test failed: $cmd"
+            return 1
+        fi
+    done
+    rm -f "$config"
+    return 0
+}
+
+stax-test-tests(){
+    status=0
+    stax-message "  connecting to bastion host and running hostname"
+    if ! stax-connect bastion hostname; then
+        stax-error "failed to run hostname on bastion host"
+        status=$((status+1))
+    fi
+    for target in gateway service; do
+        for docker_cmd in images ps; do
+            stax-message "  running docker $docker_cmd on $target"
+            if ! stax-connect $target docker $docker_cmd; then
+                stax-error "failed to run docker $docker_cmd on $target"
+                status=$((status+1))
+            fi
+        done
+    done
+    stax-message "  getting etcd version"
+    if stax-connect service curl --silent --location http://localhost:4001/version; then
+        echo ""
+    else
+        echo ""
+        stax-error "failed to get etcd version"
+        status=$((status+1))
+    fi
+    stax-message "  getting etcd config"
+    if ! stax-connect service curl --silent --location http://localhost:7001/v2/admin/config; then
+        stax-error "failed to get etcd config"
+        status=$((status+1))
+    fi
+    stax-message "  getting etcd leader stats"
+    if stax-connect service curl --silent --location http://localhost:4001/v2/stats/leader; then
+        echo ""
+    else
+        echo ""
+        stax-error "failed to get etcd leader stats"
+        status=$((status+1))
+    fi
+    stax-message "  listing machines in fleet cluster"
+    if ! stax-connect service fleetctl list-machines; then
+        stax-error "failed to run fleetctl list-machines on service"
+        status=$((status+1))
+    fi
+
+    # start httpbin
+    # curl ELB/httpbin/get
+
+    return $status
+}
+
+# process positional parameters
+config="config/vpc-default.json"
+config_default="$config"
+module=
+quiet=
+template="template/vpc-default.json"
+template_default="$template"
+yes=
+sub_cmd=
+sub_cmd_args=
+prev_arg=
+for arg
+do
+    if [[ $sub_cmd ]]; then
+        if [[ -z $sub_cmd_args ]]; then
+            sub_cmd_args="$arg"
+        else
+            sub_cmd_args="$sub_cmd_args $arg"
+        fi
+        continue
+    fi
+
+    if test -n "$prev_arg"; then
+        eval "$prev_arg=\$arg"
+        prev_arg=
+        continue
+    fi
+
+    case "$arg" in
+        -*=*) optarg=`echo "$arg" | sed 's/[-_a-zA-Z0-9]*=//'` ;;
+        *) optarg= ;;
+    esac
+
+    case "$arg" in
+        -c | --config | --confi | --conf | --con | --co | --c)
+            prev_arg=config
+            ;;
+
+        --config=* | --confi=* | --conf=* | --con=* | --co=* | --c=*)
+            config="$optarg"
+            ;;
+
+        -d | --debug | --debu | --deb | --de | -d)
+            DEBUG="ON"
+            ;;
+
+        -h | --help | --hel | --he | --h)
+            stax-usage
+            exit 0;;
+
+        -j | --jump | --jum | --ju | --j)
+            prev_arg=STAX_JUMP
+            ;;
+
+        --jump=* | --jum=* | --ju=* | --j=*)
+            STAX_JUMP="$optarg"
+            ;;
+
+        -m | --module | --modul | --modu | --mod | --mo | --m)
+            prev_arg=module
+            ;;
+
+        --module=* | --modul=* | --modu=* | --mod=* | --mo=* | --m=*)
+            module="$optarg"
+            ;;
+
+        -q | --quiet | --quie | --qui | --qu | --q)
+            quiet=1
+            ;;
+
+        -t | --template | --templat | --templa | --templ | --temp | --tem | --te | --t)
+            prev_arg=template
+            ;;
+
+        --template=* | --templat=* | --templa=* | --templ=* | --temp=* | --tem=* | --te=* | --t=*)
+            template="$optarg"
+            ;;
+
+        -v | --version | --versio | --versi | --vers | --ver | --ve | --v)
+            echo "$pkg $version"
+            exit 0;;
+
+        -y | --yes | --ye | --y)
+            yes="y"
+            ;;
+
+        -*)
+            echo "$pkg: unknown option: $arg"
+            echo "$pkg: Try '$pkg --help' for help."
+            exit 1
+            ;;
+
+        *)
+            if [[ -z $sub_cmd ]]; then
+                sub_cmd="$arg"
+            else
+                echo "$pkg: error: you should not have reached this point in the code"
+                exit 10
+            fi
+            ;;
+
+    esac
+done
+
+# module only overrides defaults
+if [[ $module ]]; then
+    if [[ $config == $config_default ]]; then
+        config="config/$module.json"
+    fi
+    if [[ $template == $template_default ]]; then
+        template="template/$module.json"
+    fi
+fi
+
+# make sure a command was provided
+if [[ -z $sub_cmd ]]; then
+    stax-usage
+    exit 2
+fi
+
+stax-logger "WARN: ---- stax (tag `git log | head -n1 | cut -d " " -f2`) starting ----"
+
+# generic setup
+stax-logo
+stax-preflight
+
+# determine which subcommand to run
+if [ "$DEBUG" == "ON" ]; then echo "----- DEBUG :::: $sub_cmd $sub_cmd_args -----"; fi
+case "$sub_cmd" in
+    add)
+        if [[ $config == $config_default ]]; then
+            stax-error "you must supply a --config argument when calling add"
+            exit 1
+        fi
+        if [[ $template == $template_default ]]; then
+            stax-error "you must supply a --template argument when calling add"
+            exit 1
+        fi
+        stax-existing || exit 1
+        stax-complete || exit 1
+        if ! stax-add "$template" "$config"; then
+            stax-error-exit "add failed" 1
+        fi
+        ;;
+
+    add-logger)
+        stax-existing || exit 1
+        stax-complete || exit 1
+        if [[ ! -f $STAX_BASTION_FILE ]]; then
+            stax-bastionip || exit 1
+            stax-getdockerips || exit 1
+            stax-ssh-config || exit 1
+        fi
+        STAX_PUB_IP=$(<$STAX_BASTION_FILE)
+        if ! stax-add-logger; then
+            stax-error-exit "add-logger failed" 1
+        fi
+        ;;
+
+    auto-services)
+        stax-existing || exit 1
+        stax-complete || exit 1
+        if [ ! -f "$STAX_BASTION_FILE" ]; then
+            stax-bastionip
+            stax-getdockerips || exit 1
+            stax-ssh-config || exit 1
+        fi
+        stax-message "starting all associated services"
+        stax-autoservices "$template" || exit 1
+        stax-message "waiting for services to start" "zzzz"
+        sleep 20
+        stax-fleetstats || exit 1
+        ;;
+
+    check)
+        stax-existing || exit 1
+        stax-complete || exit 1
+        if [[ ! -f $STAX_BASTION_FILE ]]; then
+            stax-bastionip || exit 1
+            stax-getdockerips || exit 1
+            stax-ssh-config || exit 1
+        fi
+        STAX_PUB_IP=$(<$STAX_BASTION_FILE)
+        if ! stax-test-tests; then
+            stax-error "tests failed, please delete stack yourself"
+            exit 1
+        fi
+        ;;
+
+    connect)
+        stax-existing || exit 1
+        stax-complete || exit 1
+        if [[ ! -f $STAX_BASTION_FILE ]]; then
+            stax-bastionip || exit 1
+            stax-getdockerips || exit 1
+            stax-ssh-config || exit 1
+        fi
+        STAX_PUB_IP=$(<$STAX_BASTION_FILE)
+        if ! stax-connect $sub_cmd_args; then
+            exit 1
+        fi
+        ;;
+
+    create)
+        if ! stax-create "$template"; then
+            stax-error-exit "stax create failed" 1
+        fi
+        if ! stax-existing; then
+            stax-error-exit "stax create failed" 1
+        fi
+        if ! stax-describe; then
+            stax-error-exit "failed to get stack information from aws" 1
+        fi
+        stax-autoservices "$template" || exit 1
+        stax-slack "creating"
+        ;;
+
+    desc*)
+        stax-existing || exit 1
+        if ! stax-describe; then
+            stax-error-exit "stax describe failed" 1
+        fi
+        ;;
+
+    delete)
+        stax-existing || exit 1
+        if ! stax-delete; then
+            stax-error-exit "please see above errors and deal with them" 1
+        fi
+        stax-slack "deleting"
+        ;;
+
+    dockerip-update)
+        stax-existing || exit 1
+        stax-complete || exit 1
+        if [[ ! -f $STAX_BASTION_FILE ]]; then
+            stax-bastionip
+        fi
+        STAX_PUB_IP=$(<$STAX_BASTION_FILE)
+        if ! stax-getdockerips; then
+            stax-error "failed to update docker IPs"
+            exit 1
+        fi
+        if ! stax-ssh-config; then
+            stax-error "failed to update ssh config"
+            exit 1
+        fi
+        ;;
+
+    fleet)
+        stax-existing || exit 1
+        stax-complete || exit 1
+        if [ ! -f "$STAX_BASTION_FILE" ]; then
+            stax-bastionip
+            if ! stax-getdockerips; then
+                exit 1
+            fi
+            if ! stax-ssh-config; then
+                exit 1
+            fi
+        fi
+        STAX_PUB_IP=$(<$STAX_BASTION_FILE)
+        if ! stax-fleetstats; then
+            exit 1
+        fi
+        ;;
+
+    help)
+        stax-usage
+        ;;
+
+    history)
+        stax-history
+        ;;
+
+    list)
+        stax-list
+        ;;
+
+    rds)
+        if [[ ! $sub_cmd_args ]]; then
+            stax-error "you must supply a password to rds"
+            stax-error "  $ stax rds PASSWORD [NAME [USER [ENGINE [SIZE [INSTANCE_CLASS [STORAGE_TYPE]]]]]]"
+            exit 5
+        fi
+        stax-existing || exit 1
+        stax-complete || exit 1
+        if ! stax-rds $sub_cmd_args; then
+            exit 1
+        fi
+        ;;
+
+    rds-delete)
+        stax-existing || exit 1
+        if [[ ! $sub_cmd_args ]]; then
+            stax-error "you must supply an rds to delete"
+            stax-error "below are the currently added rds instances"
+            cat "$STAX_DIR/$STAX_NAME.rds"
+            exit 5
+        fi
+        status=0
+        for rds in $sub_cmd_args; do
+            if ! stax-rds-delete $rds; then
+                stax-error "failed to remove rds $rds"
+                status=$((status+1))
+            fi
+        done
+        exit $status
+        ;;
+
+    remove)
+        stax-existing || exit 1
+        if [[ ! $sub_cmd_args ]]; then
+            stax-error "you must supply an addition to remove"
+            stax-error "below are the currently added stax"
+            cat "$STAX_DIR/$STAX_NAME.add"
+            exit 5
+        fi
+        status=0
+        for addition in $sub_cmd_args; do
+            if ! stax-remove $addition; then
+                stax-error "failed to remove addition $addition"
+                status=$((status+1))
+            fi
+        done
+        exit $status
+        ;;
+
+    services)
+        stax-services
+        ;;
+
+    sleep)
+        stax-sleep || exit 1
+        ;;
+
+    slack)
+        stax-slack "$sub_cmd_args"
+        ;;
+
+    start)
+        if [[ ! $sub_cmd_args ]]; then
+            stax-error "no services listed, available ones are"
+            stax-services
+            exit 2
+        fi
+        stax-existing || exit 1
+        stax-complete || exit 1
+        if [ ! -f "$STAX_BASTION_FILE" ]; then
+            stax-bastionip
+            stax-getdockerips || exit 1
+            stax-ssh-config || exit 1
+        fi
+        for service in $sub_cmd_args; do
+            if ! stax-start-service "$service"; then
+                stax-error-exit "failed to start service: $service" 1
+            fi
+        done
+        stax-message "waiting for services to start" "zzzz"
+        sleep 20
+        if ! stax-fleetstats; then
+            exit 1
+        fi
+        ;;
+
+    test)
+        if ! stax-test-create "$template"; then
+            stax-error "test create failed, please delete stack yourself"
+            stax-delete
+            exit 1
+        fi
+        for m in 4 3 2 1; do
+            stax-message "waiting $m minutes for clustering" "zzzz"
+            sleep 60
+        done
+        if ! stax-test-tests; then
+            stax-error "some tests failed, see above for details"
+            stax-error "you can troubleshoot using the following commands:"
+            stax-error "  $ ./stax connect HOST systemctl status [-l] SERVICE"
+            stax-error "  $ ./stax connect HOST journalctl -b -u SERVICE"
+            stax-error "where HOST is gateway[N] or service[N] and SERVICE is etcd, fleet, consul, etc."
+            stax-delete
+            exit 1
+        fi
+        # do not prompt for deleting if all tests were successful
+        yes="y"
+        if ! stax-delete; then
+            stax-error "failed to delete the stack, you will need to clean up"
+            exit 1
+        fi
+        ;;
+
+    update)
+        if ! stax-existing; then
+            stax-error-exit "stax update failed, existing stax not found" 1
+        fi
+        if ! stax-update "$template"; then
+            stax-error-exit "stax update failed" 1
+        fi
+        if ! stax-describe; then
+            stax-error-exit "failed to get stack information from aws" 1
+        fi
+        stax-slack "updating"
+        ;;
+
+    validate)
+        if ! stax-validate "$template"; then
+            stax-error "template validation failed"
+            exit 1
+        fi
+        ;;
+
+    *)
+        stax-error "unknown stax command: $sub_cmd"
+        stax-usage
+        exit 2
+        ;;
+
+esac
+
+exit 0

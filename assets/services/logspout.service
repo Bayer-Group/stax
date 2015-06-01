@@ -1,0 +1,44 @@
+[Unit]
+Description=Logspout
+
+# Requirements
+Requires=docker.service
+Requires=fleet.service
+Requires=consul.service
+
+# Dependency ordering and binding
+After=docker.service
+After=fleet.service
+After=consul.service
+
+[Service]
+TimeoutStartSec=10m
+Restart=on-failure
+RestartSec=5s
+
+# Setup environment
+EnvironmentFile=/etc/environment
+Environment="ES_CLUSTER=es01"
+
+# Startup/shutdown
+ExecStartPre=-/usr/bin/docker kill %p
+ExecStartPre=-/usr/bin/docker rm %p
+ExecStartPre=/usr/bin/docker pull gliderlabs/logspout:latest
+
+ExecStart=/usr/bin/docker run --name %p \
+  -P \
+  --volume=/var/run/docker.sock:/tmp/docker.sock \
+  --hostname=$HOSTNAME \
+  --dns $(ip route | awk '/docker0/ { print $NF }') \
+  --dns-search service.consul \
+  gliderlabs/logspout:latest syslog://logstash:5000
+
+ExecStop=-/usr/bin/docker stop %p
+ExecStop=-/usr/bin/docker kill %p
+ExecStop=-/usr/bin/docker rm %p
+
+[Install]
+WantedBy=multi-user.target
+
+[X-Fleet]
+Global=true

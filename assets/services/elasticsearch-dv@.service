@@ -1,0 +1,12 @@
+[Unit]
+Description=Elasticsearch Data Volume
+
+# Requirements
+Requires=docker.service
+After=docker.service
+Before=elasticsearch@%i.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c "docker inspect %p-%i >/dev/null 2>&1 || docker run --name %p-%i -v /var/lib/elasticsearch busybox chmod -R 0777 /var/lib/elasticsearch"

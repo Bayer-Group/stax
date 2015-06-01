@@ -1,0 +1,55 @@
+[Unit]
+Description=Logstash
+
+# Requirements
+Requires=docker.service
+Requires=etcd.service
+Requires=fleet.service
+
+# Dependency ordering and binding
+After=docker.service
+After=etcd.service
+After=fleet.service
+
+[Service]
+TimeoutStartSec=10m
+Restart=on-failure
+RestartSec=5s
+
+# Get CoreOS environmental variables
+EnvironmentFile=/etc/environment
+Environment="ES_CLUSTER=es01"
+
+ExecStartPre=-/usr/bin/docker stop %p
+ExecStartPre=-/usr/bin/docker kill %p
+ExecStartPre=/usr/bin/docker pull monsantoco/logstash:v1.5.0
+
+ExecStart=/bin/bash -c "\
+  /usr/bin/docker run --name %p \
+  --publish 5000:5000 \
+  --publish 5000:5000/udp \
+  --publish 5002:5002 \
+  --publish 5004:5004 \
+  --publish 5100:5100 \
+  --publish 5200:5200 \
+  --env ES_CLUSTER=${ES_CLUSTER} \
+  --env ES_HOST=elasticsearch-proxy \
+  --env ES_PORT=9200 \
+  --env SERVICE_NAME=%p \
+  --dns $(ip route | awk '/docker0/ { print $NF }') \
+  --dns-search service.consul \
+  monsantoco/logstash:v1.5.0"
+
+ExecStartPost=/usr/bin/curl -L http://${COREOS_PRIVATE_IPV4}:4001/v2/keys/services/logging/logstash/host/${COREOS_PRIVATE_IPV4} -XPUT -d value="%H"
+
+ExecStop=-/usr/bin/docker stop %p
+ExecStop=-/usr/bin/docker kill %p
+ExecStop=-/usr/bin/docker rm %p
+
+ExecStopPost=/usr/bin/curl -L http://${COREOS_PRIVATE_IPV4}:4001/v2/keys/services/logging/logstash/host/${COREOS_PRIVATE_IPV4} -XDELETE
+
+[Install]
+WantedBy=multi-user.target
+
+[X-Fleet]
+Conflicts=%p.service

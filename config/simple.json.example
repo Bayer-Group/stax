@@ -1,0 +1,12 @@
+[
+  { "ParameterKey": "Project",            "ParameterValue": "<changeMe>" },
+  { "ParameterKey": "Product",            "ParameterValue": "<changeMe>" },
+  { "ParameterKey": "Group",              "ParameterValue": "<changeMe>" },
+  { "ParameterKey": "Team",               "ParameterValue": "<changeMe>" },
+  { "ParameterKey": "Environment",        "ParameterValue": "<changeMe>" },
+  { "ParameterKey": "KeepAlive",          "ParameterValue": "false" },
+  { "ParameterKey": "InstanceType",       "ParameterValue": "t2.micro" },
+  { "ParameterKey": "Owner",              "ParameterValue": "@OWNER@" },
+  { "ParameterKey": "KeyName",            "ParameterValue": "@KEY_NAME@" },
+  { "ParameterKey": "SSHLocation",        "ParameterValue": "@SSH_FROM@" }
+]

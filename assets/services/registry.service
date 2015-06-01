@@ -1,0 +1,11 @@
+[Unit]
+Description=Private Docker Registry
+After=docker.service
+Requires=docker.service
+
+[Service]
+ExecStartPre=-/usr/bin/docker kill registry
+ExecStartPre=-/usr/bin/docker rm registry
+ExecStartPre=/usr/bin/docker pull registry:0.9.1
+ExecStart=/usr/bin/docker run --name register -P registry:0.9.1
+ExecStop=/usr/bin/docker stop registry
