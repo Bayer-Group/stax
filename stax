@@ -1538,25 +1538,22 @@ stax-rds-delete(){
 }
 
 stax-slack(){
-    if [ ! -z "$STAX_SLACK_WHOOK" ]; then 
-        stax-message "posting results to slack/#stax" 
-        report=
-        if [[ $1 ]]; then
-            status="$1"
-        fi
-        slack_curl="curl --silent -X POST --data-urlencode"
-        user=$(id -u -n)
-        slack_payload_prefix="payload={\"channel\":\"#stax\",\"username\":\"staxbot\",\"icon_emoji\":\":ghost:\",\"text\":\"$user@$host:"
-        if [[ $status ]]; then
-            slack_payload="$slack_payload_prefix $status $STAX_NAME\"}"
-            $slack_curl "$slack_payload" $STAX_SLACK_WHOOK > /dev/null
-        fi
-        slack_instances=$(stax-running-instances)
-        slack_payload="$slack_payload_prefix currently $slack_instances running ec2 instances\"}"
-        $slack_curl "$slack_payload" $STAX_SLACK_WHOOK > /dev/null
-    else
-        return 1
+    [[ $STAX_SLACK_WHOOK ]] || return 1
+    stax-message "posting results to slack/#stax"
+    report=
+    if [[ $1 ]]; then
+        status="$1"
     fi
+    slack_curl="curl --silent -X POST --data-urlencode"
+    user=$(id -u -n)
+    slack_payload_prefix="payload={\"channel\":\"#stax\",\"username\":\"staxbot\",\"icon_emoji\":\":ghost:\",\"text\":\"$user@$host:"
+    if [[ $status ]]; then
+        slack_payload="$slack_payload_prefix $status $STAX_NAME\"}"
+        $slack_curl "$slack_payload" "$STAX_SLACK_WHOOK" > /dev/null
+    fi
+    slack_instances=$(stax-running-instances)
+    slack_payload="$slack_payload_prefix currently $slack_instances running ec2 instances\"}"
+    $slack_curl "$slack_payload" "$STAX_SLACK_WHOOK" > /dev/null
 }
 
 # automated test
