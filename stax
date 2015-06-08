@@ -6,7 +6,7 @@
 
 # variables
 pkg="stax"
-version="0.10"
+version="0.11"
 script_path=$(cd $(dirname $0); pwd -P)
 system=$(uname)
 STAX_DIR="$script_path/run"
@@ -102,6 +102,7 @@ Commands:
   add-logger         Add logging functionality to an existing VPC
   auto-services      Lanch multiple services on fleet using template/NAME.services file
   check              Run various tests against an existing stax
+  clean              Remove keys and buckets of non-existant stacks
   connect [TARGET]   Connect to bastion|gateway|service in the VPC stax over SSH
   create             Create a new VPC stax in AWS
   describe           Describe the stax created from this host
@@ -167,9 +168,60 @@ stax-preflight(){
         stax-error-exit "unsupported platform: $system" 1
     fi
     if [ -f "$HOME/.stax.config" ]; then
-        source $HOME/.stax.config
+        . $HOME/.stax.config
     fi
     tag_prefix=${STAX_TAG_PREFIX:-"stax"}
+}
+
+stax-clean(){
+    stax-message "cleaning old keys and buckets"
+    stax-message "  getting current stacks"
+    stax_stacks_re=$(aws --output json cloudformation describe-stacks | jq --raw-output '.Stacks | .[].StackName' | xargs | sed 's/  */|/g')
+    if [[ $? != 0 ]]; then
+        stax-error "failed to retrieve stacks"
+        return 1
+    fi
+    stax-message "  getting stax-like s3 buckets"
+    stax_buckets=$(aws s3 ls | awk '/vpc-stax/ { print $NF }' | grep -v -E "$stax_stacks_re" | xargs)
+    if [[ $? != 0 ]]; then
+        stax-error "failed to retrieve stax-like buckets"
+        return 1
+    fi
+    stax-message "  getting stax-like keys"
+    stax_keys=$(aws --output json ec2 describe-key-pairs | jq --raw-output '.KeyPairs | .[].KeyName' | grep vpc-stax | grep -v -E "$stax_stacks_re" | xargs)
+    if [[ $? != 0 ]]; then
+        stax-error "failed to retrieve stax-like keys"
+        return 1
+    fi
+    if [[ ! $stax_buckets && ! $stax_keys ]]; then
+        stax-message "nothing to clean"
+        return 0
+    fi
+    stax-message "s3 buckets that will be deleted: $stax_buckets"
+    stax-message "ssh keys that will be deleted:   $stax_keys"
+    if [[ $yes != y ]]; then
+        read -p "${yellow}[ ${cyan}????${yellow} ]${reset}     ok to remove s3 buckets and ssh keys [y/n]? " answer
+        if [[ $answer != y ]] ; then
+            stax-message "  will not clean"
+            return 0
+        fi
+    fi
+    status=0
+    for bucket in $stax_buckets; do
+        stax-message "removing s3 bucket: $bucket"
+        if ! aws s3 rb --force "s3://$bucket" > /dev/null; then
+            stax-error "failed to delete s3 bucket: $bucket"
+            status=$((status+1))
+        fi
+    done
+    for key in $stax_keys; do
+        stax-message "removing ssh key: $key"
+        if ! aws ec2 delete-key-pair --key-name "$key" > /dev/null; then
+            stax-error "failed to delete key: $key"
+            status=$((status+1))
+        fi
+    done
+    return $status
 }
 
 stax-create-key(){
@@ -1058,7 +1110,8 @@ stax-getdockerips(){
     stax-message "get gateway and service IPs"
     stax-message "  querying aws for gateway hosts"
     gateway_hosts="$STAX_DIR/$STAX_NAME.gateway_hosts"
-    if ! aws --output json ec2 describe-instances | $jq --raw-output ".Reservations[].Instances[] | select(.Tags[].Value==\"gateway-$STAX_NAME\").PrivateIpAddress" > "$gateway_hosts" 2>/dev/null; then
+    aws_ec2_desc_instances="aws --output json ec2 describe-instances --filters Name=instance-state-name,Values=running"
+    if ! $aws_ec2_desc_instances | $jq --raw-output ".Reservations[].Instances[] | select(.Tags[].Value==\"gateway-$STAX_NAME\").PrivateIpAddress" > "$gateway_hosts" 2>/dev/null; then
         stax-error "failed to query aws for gateway instances"
         return 1
     fi
@@ -1071,7 +1124,7 @@ stax-getdockerips(){
         fi
     done
     stax-message "  querying aws for service hosts"
-    if ! aws --output json ec2 describe-instances | $jq --raw-output ".Reservations[].Instances[] | select(.Tags[].Value==\"service-$STAX_NAME\").PrivateIpAddress" >> "$service_hosts" 2>/dev/null; then
+    if ! $aws_ec2_desc_instances | $jq --raw-output ".Reservations[].Instances[] | select(.Tags[].Value==\"service-$STAX_NAME\").PrivateIpAddress" >> "$service_hosts" 2>/dev/null; then
         stax-error "failed to query aws for service instances"
         return 1
     fi
@@ -1110,7 +1163,6 @@ stax-delete-key(){
         return 0
     fi
     stax-message "  deleting $STAX_NAME key from aws"
-    status=0
     if ! aws ec2 delete-key-pair --key-name "$STAX_NAME" > /dev/null; then
         stax-error "failed to delete key $STAX_NAME, please remove it manually"
         return 1
@@ -1486,25 +1538,22 @@ stax-rds-delete(){
 }
 
 stax-slack(){
-    if [ ! -z "$STAX_SLACK_WHOOK" ]; then 
-        stax-message "posting results to slack/#stax" 
-        report=
-        if [[ $1 ]]; then
-            status="$1"
-        fi
-        slack_curl="curl --silent -X POST --data-urlencode"
-        user=$(id -u -n)
-        slack_payload_prefix="payload={\"channel\":\"#stax\",\"username\":\"staxbot\",\"icon_emoji\":\":ghost:\",\"text\":\"$user@$host:"
-        if [[ $status ]]; then
-            slack_payload="$slack_payload_prefix $status $STAX_NAME\"}"
-            $slack_curl "$slack_payload" $STAX_SLACK_WHOOK > /dev/null
-        fi
-        slack_instances=$(stax-running-instances)
-        slack_payload="$slack_payload_prefix currently $slack_instances running ec2 instances\"}"
-        $slack_curl "$slack_payload" $STAX_SLACK_WHOOK > /dev/null
-    else
-        return 1
+    [[ $STAX_SLACK_WHOOK ]] || return 1
+    stax-message "posting results to slack/#stax"
+    report=
+    if [[ $1 ]]; then
+        status="$1"
     fi
+    slack_curl="curl --silent -X POST --data-urlencode"
+    user=$(id -u -n)
+    slack_payload_prefix="payload={\"channel\":\"#stax\",\"username\":\"staxbot\",\"icon_emoji\":\":ghost:\",\"text\":\"$user@$host:"
+    if [[ $status ]]; then
+        slack_payload="$slack_payload_prefix $status $STAX_NAME\"}"
+        $slack_curl "$slack_payload" "$STAX_SLACK_WHOOK" > /dev/null
+    fi
+    slack_instances=$(stax-running-instances)
+    slack_payload="$slack_payload_prefix currently $slack_instances running ec2 instances\"}"
+    $slack_curl "$slack_payload" "$STAX_SLACK_WHOOK" > /dev/null
 }
 
 # automated test
@@ -1521,8 +1570,8 @@ stax-test-create(){
 [
   { "ParameterKey": "Project",            "ParameterValue": "Stax Auto Test" },
   { "ParameterKey": "Product",            "ParameterValue": "Stax User Auto Test" },
-  { "ParameterKey": "Group",              "ParameterValue": "TestGroup" },
-  { "ParameterKey": "Team",               "ParameterValue": "TestTeam" },
+  { "ParameterKey": "Group",              "ParameterValue": "Stax Test Group" },
+  { "ParameterKey": "Team",               "ParameterValue": "Stax Test Team" },
   { "ParameterKey": "Environment",        "ParameterValue": "test" },
   { "ParameterKey": "KeepAlive",          "ParameterValue": "false" },
   { "ParameterKey": "DockerInstanceType", "ParameterValue": "t2.micro" },
@@ -1791,6 +1840,10 @@ case "$sub_cmd" in
             stax-error "tests failed, please delete stack yourself"
             exit 1
         fi
+        ;;
+
+    clean)
+        stax-clean || exit 1
         ;;
 
     connect)
