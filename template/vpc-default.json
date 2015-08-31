@@ -2748,13 +2748,6 @@
       "MaxValue": "12",
       "Type": "Number"
     },
-    "WebOAuthProviderBaseURL": {
-      "Default": "",
-      "MinLength": "0",
-      "Description": "Base URL for the OAuth provider.  Include https.",
-      "MaxLength": "64",
-      "Type": "String"
-    },
     "CoreOSChannelAMI": {
       "Default": "CoreOSStableAMI",
       "Description": "MapName for the update channel AMI to use when launching CoreOS instances",
@@ -2941,13 +2934,6 @@
       "Description": "Password for private Docker Registry",
       "NoEcho": true,
       "MaxLength": "60",
-      "Type": "String"
-    },
-    "WebOAuthProvider": {
-      "Default": "ping",
-      "MinLength": "0",
-      "Description": "OAuth provider name. Must be a supported value in nginx-s3-oauth.",
-      "MaxLength": "64",
       "Type": "String"
     }
   },
